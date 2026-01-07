@@ -26,7 +26,7 @@ def do_test(model: pl.LightningModule, trainer: pl.Trainer, ckpt_path: str, data
     elif ckpt_path == "last":
         state_dict = torch.load(trainer.checkpoint_callback.last_model_path, weights_only=False)["state_dict"]
     else:
-        state_dict = torch.load(ckpt_path)["state_dict"]
+        state_dict = torch.load(ckpt_path, weights_only=False)["state_dict"]
         logger.info(f"Loading ckpt from {ckpt_path}")
     logger.info(model.load_state_dict(state_dict=state_dict, strict=False))
     for i in range(args.test_times):

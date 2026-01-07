@@ -489,6 +489,48 @@ class LitDiffLaRFused(LitCoTModelBase):
                      batch_size=self.all_config.dataloader.batch_size)
         return log_dict["total_loss"]
 
+    def on_test_start(self):
+        """测试开始前确保latent stats已初始化"""
+        super().on_test_start()
+        
+        # 如果latent stats未初始化，需要重新估计
+        if self.latent_diffusion.normalize_latent and not self._latent_stats_estimated:
+            print("Warning: Latent stats not initialized, re-estimating from test data...")
+            self._estimate_latent_stats_from_test(self.trainer.datamodule)
+
+    def _estimate_latent_stats_from_test(self, datamodule):
+        """从测试数据估计latent stats（当没有训练数据时使用）"""
+        print("Estimating latent statistics from test data...")
+        
+        # 确保datamodule已setup
+        if not hasattr(datamodule, 'test_dataset') or datamodule.test_dataset is None:
+            datamodule.setup('test')
+        
+        test_loader = datamodule.test_dataloader()
+        
+        all_embeds = []
+        all_masks = []
+        num_samples = 0
+        max_samples = 500
+        
+        with torch.no_grad():
+            for batch in test_loader:
+                steps = batch["steps"]
+                steps_embeds, steps_mask = self.prepare_fixed_length_steps(steps)
+                all_embeds.append(steps_embeds.cpu())
+                all_masks.append(steps_mask.cpu())
+                num_samples += len(steps)
+                if num_samples >= max_samples:
+                    break
+        
+        all_embeds = torch.cat(all_embeds, dim=0).to(self.device)
+        all_masks = torch.cat(all_masks, dim=0).to(self.device)
+        
+        mean, std, scale = self.latent_diffusion.estimate_latent_stats(all_embeds, all_masks)
+        
+        self._latent_stats_estimated = True
+        print(f"Latent stats estimated: Mean norm={mean.norm():.4f}, Std mean={std.mean():.6f}, Scale={scale:.4f}")
+
     def on_fit_end(self):
         """训练结束时绘制Loss曲线"""
         super().on_fit_end() if hasattr(super(), 'on_fit_end') else None
