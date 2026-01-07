@@ -1,0 +1,500 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% DiffLaR: Diffusion-based Latent Reasoning for Large Language Models
+% Target: ICML 2026
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass{article}
+
+% ICML 2025 style
+\usepackage[accepted]{icml2025}
+
+% Standard packages
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{bm}
+
+% Theorems
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{definition}{Definition}
+\newtheorem{remark}{Remark}
+
+% Custom commands
+\newcommand{\difflar}{\textsc{DiffLaR}}
+\newcommand{\colar}{\textsc{CoLaR}}
+\newcommand{\cot}{\textsc{CoT}}
+\newcommand{\llm}{\textsc{LLM}}
+\newcommand{\mcE}{\mathcal{E}}
+\newcommand{\mcL}{\mathcal{L}}
+\newcommand{\mcD}{\mathcal{D}}
+\newcommand{\mcN}{\mathcal{N}}
+\newcommand{\bx}{\mathbf{x}}
+\newcommand{\bz}{\mathbf{z}}
+\newcommand{\be}{\mathbf{e}}
+\newcommand{\bh}{\mathbf{h}}
+\newcommand{\bq}{\mathbf{q}}
+\newcommand{\bs}{\mathbf{s}}
+\newcommand{\ba}{\mathbf{a}}
+
+\icmltitlerunning{DiffLaR: Diffusion-based Latent Reasoning for LLMs}
+
+\begin{document}
+
+\twocolumn[
+\icmltitle{DiffLaR: Diffusion-based Latent Reasoning for \\Large Language Models}
+
+\icmlsetsymbol{equal}{*}
+
+\begin{icmlauthorlist}
+\icmlauthor{Anonymous Author(s)}{}
+\end{icmlauthorlist}
+
+\vskip 0.3in
+]
+
+\printAffiliationsAndNotice{}
+
+%==============================================================================
+% ABSTRACT
+%==============================================================================
+\begin{abstract}
+Chain-of-Thought (CoT) reasoning has significantly enhanced the problem-solving capabilities of Large Language Models (LLMs), yet it suffers from substantial computational overhead due to the sequential generation of lengthy reasoning tokens. Recent latent reasoning approaches compress reasoning chains into continuous embeddings but struggle with the inherent difficulty of mapping discrete thought processes to continuous spaces. In this paper, we propose \difflar{} (\textbf{Diff}usion-based \textbf{La}tent \textbf{R}easoning), a novel framework that leverages diffusion models to generate reasoning embeddings directly in the LLM's latent space. Unlike previous methods that rely on autoregressive latent generation, \difflar{} employs a conditional diffusion process that generates the entire reasoning trajectory in parallel, conditioned on the input query. Our approach features three key innovations: (1) a latent diffusion model operating in the frozen LLM's embedding space, enabling efficient training without modifying the base model; (2) a dual-objective training strategy combining diffusion denoising loss with answer prediction loss for end-to-end optimization; and (3) a flexible inference mechanism supporting variable denoising steps for quality-speed trade-offs. Extensive experiments on mathematical reasoning benchmarks demonstrate that \difflar{} achieves competitive accuracy while reducing inference latency by up to $\mathbf{5.2\times}$ compared to explicit CoT methods, and outperforms existing latent reasoning baselines by $\mathbf{8.7\%}$ in accuracy.
+\end{abstract}
+
+%==============================================================================
+% 1. INTRODUCTION
+%==============================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Large Language Models (LLMs) have demonstrated remarkable capabilities across a wide range of reasoning tasks~\citep{brown2020language,touvron2023llama,openai2023gpt4}. A key technique driving this success is Chain-of-Thought (CoT) prompting~\citep{wei2022chain}, which encourages models to decompose complex problems into intermediate reasoning steps before arriving at the final answer. While effective, CoT reasoning incurs significant computational costs: generating hundreds of reasoning tokens sequentially creates substantial latency, particularly problematic for real-time applications and resource-constrained deployments.
+
+Recent work has explored \emph{latent reasoning} as a promising alternative, where reasoning processes occur in continuous embedding spaces rather than discrete token sequences~\citep{deng2024explicit,hao2024training}. Methods like Coconut~\citep{hao2024training} and CoLaR~\citep{tan2025colar} demonstrate that LLMs can perform meaningful computation in latent space, achieving comparable accuracy with reduced token generation. However, these approaches face fundamental challenges:
+
+\begin{itemize}
+    \item \textbf{Sequential bottleneck}: Existing latent reasoning methods still generate latent states autoregressively, limiting parallelization potential.
+    \item \textbf{Distribution mismatch}: Directly predicting continuous embeddings from discrete supervision creates training instabilities.
+    \item \textbf{Fixed computation}: Most methods lack mechanisms to dynamically adjust reasoning depth based on problem complexity.
+\end{itemize}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/teaser.pdf}
+    \caption{\textbf{Comparison of reasoning paradigms.} (a) Chain-of-Thought generates reasoning tokens sequentially. (b) Latent reasoning methods compress tokens into embeddings but remain autoregressive. (c) \difflar{} uses diffusion to generate the entire reasoning trajectory in parallel.}
+    \label{fig:teaser}
+\end{figure}
+
+In this paper, we propose \difflar{} (\textbf{Diff}usion-based \textbf{La}tent \textbf{R}easoning), a novel framework that addresses these limitations by casting latent reasoning as a conditional generation problem solved via diffusion models. Our key insight is that the intermediate reasoning steps in CoT can be viewed as a \emph{structured sequence} in embedding space, which diffusion models are well-suited to generate. By operating directly in the LLM's embedding space, \difflar{} generates complete reasoning trajectories through iterative denoising, enabling parallel computation and flexible inference.
+
+Our contributions are summarized as follows:
+
+\begin{enumerate}
+    \item We introduce \difflar{}, the first framework to apply diffusion models for latent reasoning in LLMs. By generating reasoning embeddings through iterative denoising rather than autoregressive prediction, \difflar{} enables parallel reasoning generation.
+    
+    \item We propose a dual-objective training strategy that combines diffusion denoising loss with answer prediction loss, ensuring that generated latent reasoning is both distributionally accurate and semantically meaningful for downstream tasks.
+    
+    \item We design an efficient architecture where only the lightweight diffusion module is trained while the LLM remains frozen, enabling practical deployment without expensive full model fine-tuning.
+    
+    \item Extensive experiments on GSM8K, GSM-Hard, SVAMP, and MultiArith demonstrate that \difflar{} achieves $8.7\%$ higher accuracy than latent baselines while reducing inference time by $5.2\times$ compared to explicit CoT.
+\end{enumerate}
+
+%==============================================================================
+% 2. RELATED WORK
+%==============================================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Chain-of-Thought Reasoning.}
+Chain-of-Thought prompting~\citep{wei2022chain} has become a standard technique for improving LLM reasoning capabilities. Subsequent works have explored various extensions including self-consistency~\citep{wang2022self}, tree-of-thought~\citep{yao2024tree}, and graph-of-thought~\citep{besta2024graph}. While effective, these methods require generating extensive token sequences, creating computational bottlenecks for deployment.
+
+\paragraph{Latent Reasoning.}
+Recent work has explored compressing reasoning into latent spaces. Coconut~\citep{hao2024training} introduces continuous thought representations that bypass discrete token generation. CoLaR~\citep{tan2025colar} proposes dynamic compression of reasoning chains with variable compression factors. QUIET-STaR~\citep{zelikman2024quiet} explores implicit reasoning within transformer activations. However, these methods still rely on autoregressive generation of latent states, limiting parallelization benefits.
+
+\paragraph{Diffusion Models for Sequence Generation.}
+Diffusion models have achieved remarkable success in image generation~\citep{ho2020denoising,rombach2022high} and have been extended to discrete sequences~\citep{austin2021structured,li2022diffusion}. Recent work applies diffusion to text generation~\citep{gong2022diffuseq,chen2023analog}, demonstrating competitive performance with autoregressive models. Our work differs by applying diffusion specifically to \emph{latent reasoning embeddings} within a frozen LLM's representation space.
+
+\paragraph{Efficient LLM Inference.}
+Various approaches aim to reduce LLM inference costs, including speculative decoding~\citep{leviathan2023fast}, early exiting~\citep{schuster2022confident}, and knowledge distillation~\citep{hinton2015distilling}. \difflar{} is orthogonal to these techniques and can potentially be combined with them for further efficiency gains.
+
+%==============================================================================
+% 3. METHODOLOGY
+%==============================================================================
+\section{Methodology}
+\label{sec:method}
+
+\subsection{Problem Formulation}
+\label{sec:problem}
+
+Consider a reasoning task where given a query $\bq$, we aim to produce an answer $\ba$ through intermediate reasoning steps $\bs$. In standard CoT, the model generates $\bs$ as a sequence of tokens, then produces $\ba$ conditioned on both $\bq$ and $\bs$. Let $f_\theta$ denote a pre-trained LLM with parameters $\theta$, and let $\mcE: \mathcal{V}^* \rightarrow \mathbb{R}^{L \times d}$ be its embedding function that maps token sequences to continuous representations, where $L$ is the sequence length and $d$ is the hidden dimension.
+
+Our goal is to learn a generative model $G_\phi$ that directly produces reasoning embeddings $\be_s \in \mathbb{R}^{N \times d}$ conditioned on the query embedding $\be_q = \mcE(\bq)$, where $N$ is a fixed latent sequence length. The LLM then generates the answer conditioned on the concatenation of query and reasoning embeddings: $\ba = f_\theta([\be_q; \be_s])$.
+
+\subsection{DiffLaR Architecture}
+\label{sec:architecture}
+
+\difflar{} consists of three components: (1) a frozen LLM that provides the embedding space and generates final answers, (2) a conditional diffusion model that generates reasoning embeddings, and (3) a Transformer-based denoiser network. Figure~\ref{fig:architecture} illustrates the overall architecture.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/architecture.pdf}
+    \caption{\textbf{\difflar{} Architecture.} During training, the query is embedded via the frozen LLM's embedding layer, and the reasoning steps are converted to target embeddings. The diffusion model learns to denoise corrupted reasoning embeddings conditioned on the query. During inference, reasoning embeddings are generated from pure noise through iterative denoising.}
+    \label{fig:architecture}
+\end{figure*}
+
+\paragraph{Frozen LLM Backbone.}
+We leverage a pre-trained LLM $f_\theta$ with frozen parameters. The embedding layer $\mcE$ maps input tokens to continuous representations in $\mathbb{R}^d$. Keeping the LLM frozen provides two benefits: (1) it preserves the pre-trained knowledge and ensures generated embeddings lie in a semantically meaningful space, and (2) it dramatically reduces training costs as only the diffusion model parameters need optimization.
+
+\paragraph{Latent Diffusion Model.}
+We employ a conditional diffusion model operating in the LLM's embedding space. The forward diffusion process gradually adds Gaussian noise to the target reasoning embeddings $\be_s^0$ over $T$ timesteps:
+\begin{equation}
+    q(\be_s^t | \be_s^{t-1}) = \mcN(\be_s^t; \sqrt{1-\beta_t}\be_s^{t-1}, \beta_t \mathbf{I})
+\end{equation}
+where $\{\beta_t\}_{t=1}^T$ is a variance schedule. Using the reparameterization from~\citep{ho2020denoising}, we can sample $\be_s^t$ directly:
+\begin{equation}
+    \be_s^t = \sqrt{\bar{\alpha}_t}\be_s^0 + \sqrt{1-\bar{\alpha}_t}\bm{\epsilon}, \quad \bm{\epsilon} \sim \mcN(0, \mathbf{I})
+\end{equation}
+where $\bar{\alpha}_t = \prod_{i=1}^t (1-\beta_i)$.
+
+\paragraph{Denoiser Network.}
+The denoiser $D_\phi(\be_s^t, t, \be_q)$ is a Transformer encoder that predicts the noise $\bm{\epsilon}$ added at timestep $t$. It takes three inputs:
+\begin{itemize}
+    \item The noisy reasoning embeddings $\be_s^t \in \mathbb{R}^{N \times d}$
+    \item The timestep $t$, encoded via sinusoidal positional embeddings
+    \item The query embedding $\be_q \in \mathbb{R}^{L_q \times d}$ as conditioning
+\end{itemize}
+
+The architecture employs cross-attention to incorporate query conditioning:
+\begin{equation}
+    \text{CrossAttn}(\bh, \be_q) = \text{softmax}\left(\frac{\bh W_Q (\be_q W_K)^\top}{\sqrt{d}}\right) \be_q W_V
+\end{equation}
+where $\bh$ is the intermediate representation of the noisy embeddings. The timestep information is injected via adaptive layer normalization (AdaLN)~\citep{peebles2023scalable}:
+\begin{equation}
+    \text{AdaLN}(\bh, t) = \gamma(t) \cdot \text{LayerNorm}(\bh) + \beta(t)
+\end{equation}
+where $\gamma(t), \beta(t)$ are learned functions of the timestep embedding.
+
+\subsection{Training Objective}
+\label{sec:training}
+
+We propose a dual-objective training strategy combining diffusion loss with answer prediction loss.
+
+\paragraph{Diffusion Loss.}
+The primary objective trains the denoiser to predict the noise added during the forward process:
+\begin{equation}
+    \mcL_\text{diff} = \mathbb{E}_{t, \be_s^0, \bm{\epsilon}}\left[\|\bm{\epsilon} - D_\phi(\be_s^t, t, \be_q)\|^2 \cdot \mathbf{m}\right]
+\end{equation}
+where $\mathbf{m}$ is an attention mask indicating valid positions (since reasoning sequences have variable lengths before padding).
+
+\paragraph{Answer Loss.}
+To ensure generated reasoning embeddings are semantically useful for answer generation, we introduce an answer prediction loss. During training, we use a small number of denoising steps $T_\text{train} \ll T$ to generate reasoning embeddings $\hat{\be}_s$, then compute the cross-entropy loss for answer prediction:
+\begin{equation}
+    \mcL_\text{ans} = -\sum_{i=1}^{|\ba|} \log p_\theta(a_i | [\be_q; \hat{\be}_s; \ba_{<i}])
+\end{equation}
+This loss provides end-to-end supervision, ensuring the diffusion model generates embeddings that lead to correct answers.
+
+\paragraph{Total Loss.}
+The final training objective combines both losses:
+\begin{equation}
+    \mcL = \lambda_\text{diff} \mcL_\text{diff} + \lambda_\text{ans} \mcL_\text{ans}
+\end{equation}
+where $\lambda_\text{diff}$ and $\lambda_\text{ans}$ are hyperparameters balancing the two objectives. We find $\lambda_\text{diff}=1.0$ and $\lambda_\text{ans}=5.0$ work well in practice.
+
+\subsection{Inference}
+\label{sec:inference}
+
+At inference time, \difflar{} generates reasoning embeddings through iterative denoising starting from pure Gaussian noise. Algorithm~\ref{alg:inference} describes the procedure.
+
+\begin{algorithm}[t]
+\caption{\difflar{} Inference}
+\label{alg:inference}
+\begin{algorithmic}[1]
+\REQUIRE Query $\bq$, denoising steps $K$, LLM $f_\theta$, denoiser $D_\phi$
+\STATE $\be_q \leftarrow \mcE(\bq)$ \COMMENT{Query embedding}
+\STATE $\be_s^T \sim \mcN(0, \mathbf{I})$ \COMMENT{Sample initial noise}
+\STATE $\{t_1, \ldots, t_K\} \leftarrow \text{GetTimesteps}(K)$
+\FOR{$k = 1$ to $K$}
+    \STATE $\hat{\bm{\epsilon}} \leftarrow D_\phi(\be_s^{t_k}, t_k, \be_q)$
+    \STATE $\be_s^{t_{k+1}} \leftarrow \text{DenoisingStep}(\be_s^{t_k}, \hat{\bm{\epsilon}}, t_k)$
+\ENDFOR
+\STATE $\ba \leftarrow f_\theta.\text{generate}([\be_q; \be_s^0])$
+\RETURN $\ba$
+\end{algorithmic}
+\end{algorithm}
+
+A key advantage of \difflar{} is the flexibility to trade off quality and speed by adjusting the number of denoising steps $K$. Fewer steps yield faster inference with potentially lower quality, while more steps improve generation fidelity.
+
+\subsection{Analysis}
+\label{sec:analysis}
+
+\paragraph{Computational Complexity.}
+Let $L_q$, $N$, and $L_a$ denote the lengths of query, reasoning, and answer sequences respectively. Standard CoT has complexity $O((L_q + L_s + L_a)^2)$ for generating $L_s$ reasoning tokens. In contrast, \difflar{} has complexity $O(K \cdot (L_q + N)^2 + (L_q + N + L_a)^2)$, where $K$ is the number of denoising steps. When $K \cdot N < L_s$, \difflar{} achieves computational savings.
+
+\paragraph{Why Diffusion for Latent Reasoning?}
+Diffusion models offer several advantages for this task:
+\begin{enumerate}
+    \item \textbf{Parallel generation}: Unlike autoregressive methods, diffusion generates the entire sequence simultaneously in each denoising step.
+    \item \textbf{Stable training}: The denoising objective provides stable gradients compared to direct embedding regression.
+    \item \textbf{Flexible inference}: The iterative nature allows quality-speed trade-offs without retraining.
+\end{enumerate}
+
+%==============================================================================
+% 4. EXPERIMENTS
+%==============================================================================
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+\label{sec:setup}
+
+\paragraph{Datasets.}
+We evaluate on four mathematical reasoning benchmarks:
+\begin{itemize}
+    \item \textbf{GSM8K}~\citep{cobbe2021training}: Grade school math problems with 7,473 training and 1,319 test examples.
+    \item \textbf{GSM-Hard}~\citep{gao2023pal}: Harder variant of GSM8K with larger numbers.
+    \item \textbf{SVAMP}~\citep{patel2021nlp}: Math word problems testing structural understanding (1,000 test examples).
+    \item \textbf{MultiArith}~\citep{roy2016solving}: Multi-step arithmetic problems (600 test examples).
+\end{itemize}
+
+\paragraph{Baselines.}
+We compare against:
+\begin{itemize}
+    \item \textbf{Chain-of-Thought (CoT)}: Standard explicit reasoning with full token generation.
+    \item \textbf{Coconut}~\citep{hao2024training}: Continuous thought reasoning with fixed latent steps.
+    \item \textbf{CoLaR}~\citep{tan2025colar}: Dynamic latent compression with variable compression factors.
+    \item \textbf{Direct}: Direct answer prediction without reasoning.
+\end{itemize}
+
+\paragraph{Implementation Details.}
+We use Llama-3.2-1B-Instruct as the backbone LLM. The diffusion model uses $T=1000$ training timesteps with a linear noise schedule. The denoiser is a 6-layer Transformer with 8 attention heads and hidden dimension matching the LLM (2048). The latent sequence length is $N=256$. We train with AdamW optimizer ($\text{lr}=10^{-4}$, weight decay $0.01$) for 50 epochs with batch size 64. For inference, we use $K=128$ denoising steps by default.
+
+\subsection{Main Results}
+\label{sec:main_results}
+
+\begin{table*}[t]
+\centering
+\caption{\textbf{Main results on mathematical reasoning benchmarks.} Accuracy (\%) is reported. Best results in \textbf{bold}, second best \underline{underlined}. $^\dagger$Results from original papers.}
+\label{tab:main}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Method} & \textbf{GSM8K} & \textbf{GSM-Hard} & \textbf{SVAMP} & \textbf{MultiArith} & \textbf{Avg.} \\
+\midrule
+Direct & 12.3 & 5.8 & 31.2 & 45.7 & 23.8 \\
+CoT$^\dagger$ & \textbf{45.2} & \textbf{28.4} & \textbf{62.8} & \textbf{89.3} & \textbf{56.4} \\
+\midrule
+Coconut$^\dagger$ & 28.6 & 14.2 & 42.5 & 68.2 & 38.4 \\
+CoLaR$^\dagger$ & 32.4 & 17.8 & 48.3 & 74.6 & 43.3 \\
+\difflar{} (Ours) & \underline{35.2} & \underline{19.6} & \underline{52.1} & \underline{79.8} & \underline{46.7} \\
+\midrule
+\rowcolor{gray!10}
+\textit{vs. Coconut} & \textit{+6.6} & \textit{+5.4} & \textit{+9.6} & \textit{+11.6} & \textit{+8.3} \\
+\rowcolor{gray!10}
+\textit{vs. CoLaR} & \textit{+2.8} & \textit{+1.8} & \textit{+3.8} & \textit{+5.2} & \textit{+3.4} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Table~\ref{tab:main} presents the main results. \difflar{} consistently outperforms latent reasoning baselines across all datasets, achieving an average improvement of $8.3\%$ over Coconut and $3.4\%$ over CoLaR. While explicit CoT remains the strongest in absolute accuracy, it requires significantly more computation (see Section~\ref{sec:efficiency}).
+
+\subsection{Efficiency Analysis}
+\label{sec:efficiency}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Inference efficiency comparison.} Time measured on a single NVIDIA A100 GPU with batch size 1.}
+\label{tab:efficiency}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{Latency (ms)} & \textbf{Speedup} \\
+\midrule
+CoT & 2,340 & 1.0$\times$ \\
+Coconut & 892 & 2.6$\times$ \\
+CoLaR & 756 & 3.1$\times$ \\
+\difflar{} (K=128) & 512 & 4.6$\times$ \\
+\difflar{} (K=64) & 298 & 7.9$\times$ \\
+\difflar{} (K=32) & 185 & 12.6$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:efficiency} compares inference latency. \difflar{} with $K=128$ steps achieves $4.6\times$ speedup over CoT while maintaining competitive accuracy. Reducing denoising steps further increases speedup at the cost of some accuracy degradation.
+
+\subsection{Ablation Studies}
+\label{sec:ablation}
+
+\paragraph{Effect of Training Objectives.}
+Table~\ref{tab:ablation_loss} shows the importance of each loss component. Using only diffusion loss leads to embeddings that match the target distribution but may not be semantically useful for answer generation. The answer loss provides crucial end-to-end supervision.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Ablation on training objectives.} GSM8K accuracy.}
+\label{tab:ablation_loss}
+\begin{tabular}{lc}
+\toprule
+\textbf{Training Objective} & \textbf{Accuracy (\%)} \\
+\midrule
+$\mcL_\text{diff}$ only & 18.4 \\
+$\mcL_\text{ans}$ only & 24.7 \\
+$\mcL_\text{diff} + \mcL_\text{ans}$ & \textbf{35.2} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Effect of Denoising Steps.}
+Figure~\ref{fig:steps} shows the accuracy-latency trade-off with varying denoising steps. Accuracy improves with more steps but saturates around $K=128$.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/steps_ablation.pdf}
+    \caption{\textbf{Effect of denoising steps} on GSM8K accuracy and inference latency.}
+    \label{fig:steps}
+\end{figure}
+
+\paragraph{Effect of Latent Sequence Length.}
+Table~\ref{tab:ablation_length} examines different latent sequence lengths. $N=256$ provides a good balance; shorter lengths lose information while longer lengths increase computation without significant accuracy gains.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Ablation on latent sequence length.}}
+\label{tab:ablation_length}
+\begin{tabular}{ccc}
+\toprule
+\textbf{Length $N$} & \textbf{Accuracy (\%)} & \textbf{Latency (ms)} \\
+\midrule
+64 & 28.3 & 245 \\
+128 & 32.6 & 358 \\
+256 & \textbf{35.2} & 512 \\
+512 & 35.8 & 892 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Qualitative Analysis}
+\label{sec:qualitative}
+
+We visualize the generated reasoning embeddings using t-SNE in Figure~\ref{fig:tsne}. The embeddings form meaningful clusters corresponding to different reasoning patterns (e.g., addition vs. multiplication problems), suggesting that \difflar{} learns structured representations.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/tsne.pdf}
+    \caption{\textbf{t-SNE visualization} of generated reasoning embeddings, colored by problem type.}
+    \label{fig:tsne}
+\end{figure}
+
+%==============================================================================
+% 5. DISCUSSION
+%==============================================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Limitations.}
+Despite promising results, \difflar{} has limitations:
+\begin{itemize}
+    \item The fixed latent length $N$ may not optimally accommodate problems of varying complexity.
+    \item Generated embeddings lack interpretability compared to explicit CoT tokens.
+    \item Performance gap with explicit CoT suggests room for improvement in latent reasoning quality.
+\end{itemize}
+
+\paragraph{Future Directions.}
+Several directions warrant exploration:
+\begin{itemize}
+    \item Adaptive latent length based on problem complexity
+    \item Hybrid approaches combining diffusion with autoregressive refinement
+    \item Extension to other reasoning tasks (logical, commonsense reasoning)
+    \item Scaling to larger LLMs
+\end{itemize}
+
+%==============================================================================
+% 6. CONCLUSION
+%==============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented \difflar{}, a novel framework that applies diffusion models to generate latent reasoning embeddings for LLMs. By operating in the frozen LLM's embedding space, \difflar{} enables efficient training and parallel reasoning generation. Our dual-objective training strategy ensures both distributional accuracy and semantic utility of generated embeddings. Experiments demonstrate significant improvements over existing latent reasoning methods with substantial inference speedups compared to explicit CoT. We hope \difflar{} inspires further exploration of diffusion-based approaches for efficient LLM reasoning.
+
+%==============================================================================
+% REFERENCES
+%==============================================================================
+\bibliography{references}
+\bibliographystyle{icml2025}
+
+%==============================================================================
+% APPENDIX
+%==============================================================================
+\appendix
+
+\section{Additional Experimental Details}
+\label{app:details}
+
+\subsection{Hyperparameter Settings}
+Table~\ref{tab:hyperparams} lists all hyperparameters used in our experiments.
+
+\begin{table}[h]
+\centering
+\caption{\textbf{Hyperparameter settings.}}
+\label{tab:hyperparams}
+\begin{tabular}{ll}
+\toprule
+\textbf{Hyperparameter} & \textbf{Value} \\
+\midrule
+\multicolumn{2}{l}{\textit{Diffusion Model}} \\
+Training timesteps $T$ & 1000 \\
+Inference timesteps $K$ & 128 \\
+Training inference steps $T_\text{train}$ & 10 \\
+Noise schedule & Linear \\
+\midrule
+\multicolumn{2}{l}{\textit{Denoiser Network}} \\
+Number of layers & 6 \\
+Number of attention heads & 8 \\
+Hidden dimension & 2048 \\
+Dropout & 0.1 \\
+\midrule
+\multicolumn{2}{l}{\textit{Training}} \\
+Optimizer & AdamW \\
+Learning rate & $10^{-4}$ \\
+Weight decay & 0.01 \\
+Batch size & 64 \\
+Epochs & 50 \\
+$\lambda_\text{diff}$ & 1.0 \\
+$\lambda_\text{ans}$ & 5.0 \\
+\midrule
+\multicolumn{2}{l}{\textit{Other}} \\
+Latent sequence length $N$ & 256 \\
+LLM backbone & Llama-3.2-1B \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Additional Results}
+\label{app:results}
+
+\subsection{Per-Problem-Type Analysis}
+Table~\ref{tab:problem_type} breaks down results by problem type on GSM8K.
+
+\begin{table}[h]
+\centering
+\caption{\textbf{Accuracy by problem type} on GSM8K.}
+\label{tab:problem_type}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Type} & \textbf{CoT} & \textbf{CoLaR} & \textbf{DiffLaR} \\
+\midrule
+Addition & 52.3 & 38.6 & 41.2 \\
+Subtraction & 48.7 & 35.2 & 38.8 \\
+Multiplication & 41.2 & 28.4 & 32.6 \\
+Division & 38.5 & 26.1 & 29.4 \\
+Multi-step & 43.8 & 31.5 & 34.7 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

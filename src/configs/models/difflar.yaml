@@ -1,0 +1,72 @@
+seed: ~
+
+model:
+  target: src.models.difflar.LitDiffLaR
+  model_kwargs:
+    model_id: Llama-3.2-1B-Instruct
+    sft_method: difflar
+    chat_template: False
+
+    do_lora: True
+    lora_config:
+      r: 128
+      lora_alpha: 32
+
+    difflar_config:
+      # Diffusion模型配置
+      max_latent_length: 256        # 固定的Latent序列长度
+      num_timesteps: 1000           # 训练时的扩散步数
+      num_inference_steps: 128      # 推理时的采样步数
+      train_inference_steps: 10     # 训练时快速采样步数
+      noise_schedule: linear        # 噪声调度类型 {linear, cosine}
+      
+      # 去噪网络配置
+      denoiser_layers: 6
+      denoiser_heads: 8
+      dropout: 0.1
+      
+      # 损失权重
+      diffusion_loss_weight: 1.0    # Loss1权重
+      answer_loss_weight: 5.0       # Loss2权重（更高）
+      
+      # CFG配置
+      use_cfg: False
+      cfg_scale: 1.5
+      
+      # === 新增优化配置 ===
+      # P0: 数据归一化（解决训练-推理分布偏移）
+      normalize_latent: True
+      
+      # P1: 预测目标（epsilon=预测噪声, x0=预测干净数据）
+      prediction_type: epsilon
+      clamp_value: 3.0              # 截断异常值防止数值爆炸
+      
+      # P2: 采样器类型（ddim更稳定，ddpm原版）
+      sampler_type: ddim
+      ddim_eta: 0.0                 # 0=确定性采样，1=随机采样
+
+    answer_generation_config:
+      max_new_tokens: 16
+      do_sample: True
+      top_p: 0.9
+      temperature: 1.0
+
+  training_kwargs:
+    optimizer:
+      target: torch.optim.AdamW
+      lr: 1e-4
+      weight_decay: 0.01
+    use_scheduler: False
+    scheduler:
+      target: constant_schedule_with_warmup
+      warmup_steps: 1000
+
+trainer:
+  max_epochs: 20
+
+dataloader:
+  batch_size: 64
+  val_batch_size: 32
+  num_workers: 8
+  pin_memory: True
+  persistent_workers: True
