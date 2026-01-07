@@ -1,0 +1,12 @@
+{
+  "model": "COT",
+  "ckpt_path": "logs/cot/qsa-gsm/20260105-092646_138769/checkpoints/epoch3__step6728__monitor0.412.ckpt",
+  "batch_size": 8,
+  "num_samples": 200,
+  "total_time_seconds": 91.69487520121038,
+  "avg_thinking_time_ms": 458.4743760060519,
+  "avg_tokens_per_sample": 213.88,
+  "time_per_token_ms": 2.143605648055227,
+  "tokens_per_second": 466.50371578711037,
+  "samples_per_second": 2.181146978619368
+}

@@ -474,7 +474,7 @@ Question: {} Let's think step by step:
             outputs_token_ids, n_latent_forward = self.fixed_length_latent_generate(questions=questions)
         elif sft_method == "cot" or sft_method == "icot":
             outputs_token_ids, n_latent_forward = self.text_generate(questions=questions)
-        elif sft_method == "difflar":
+        elif sft_method == "difflar" or sft_method == "difflar_fused":
             outputs_token_ids, n_latent_forward = self.latent_generate(questions=questions)
         else:
             raise NotImplementedError(f"Unknown sft_method: {sft_method}")

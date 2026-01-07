@@ -160,8 +160,11 @@ class LatentDiffusion(nn.Module):
         # 1. 随机采样时间步
         t = torch.randint(0, self.num_timesteps, (batch_size,), device=device)
 
-        # 2. 前向扩散：添加噪声
-        x_t, noise = self.scheduler.add_noise(x_0, t)
+        # 2. 前向扩散：添加噪声（关键改进：只在有效位置加噪声）
+        if attention_mask is not None:
+            x_t, noise = self._masked_add_noise(x_0, t, attention_mask)
+        else:
+            x_t, noise = self.scheduler.add_noise(x_0, t)
 
         # 3. Self-Conditioning: 按概率决定是否使用
         if use_self_cond is None:
@@ -213,8 +216,11 @@ class LatentDiffusion(nn.Module):
         # 1. 采样连续时间 t ~ U[0, 1]
         t = torch.rand(batch_size, device=device)
         
-        # 2. 采样噪声
+        # 2. 采样噪声（关键改进：只在有效位置添加噪声）
         noise = torch.randn_like(x_0)
+        if attention_mask is not None:
+            mask_expanded = attention_mask.unsqueeze(-1)  # [B, L, 1]
+            noise = noise * mask_expanded  # padding位置噪声为0
         
         # 3. 线性插值构造 x_t（关键！避免复杂的alpha调度）
         # x_t = (1-t)*x_0 + t*noise
@@ -222,6 +228,7 @@ class LatentDiffusion(nn.Module):
         x_t = (1 - t_expand) * x_0 + t_expand * noise
         
         # 4. 目标速度（从数据指向噪声）
+        # 对于padding位置：x_0=0, noise=0，所以velocity=0
         target_velocity = noise - x_0
         
         # 5. Self-Conditioning
@@ -425,6 +432,39 @@ class LatentDiffusion(nn.Module):
         sqrt_one_minus_alpha_cumprod = self.scheduler.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1)
         noise = (x_t - sqrt_alpha_cumprod * x_0) / (sqrt_one_minus_alpha_cumprod + 1e-8)
         return noise
+    
+    def _get_noise_level(self, t: torch.Tensor) -> torch.Tensor:
+        """获取时间步t对应的噪声水平"""
+        return self.scheduler.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1)
+    
+    def _masked_add_noise(
+        self, 
+        x_0: torch.Tensor, 
+        t: torch.Tensor, 
+        attention_mask: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        带mask的加噪声：只在有效位置添加噪声，padding位置保持为零
+        
+        这解决了变长序列的核心问题：
+        - 有效位置：正常加噪声进行扩散训练
+        - Padding位置：保持为零，不参与扩散过程
+        """
+        noise = torch.randn_like(x_0)
+        mask_expanded = attention_mask.unsqueeze(-1)  # [B, L, 1]
+        
+        # 只在有效位置添加噪声
+        noise = noise * mask_expanded
+        
+        # 使用scheduler的系数计算x_t
+        sqrt_alpha = self.scheduler.sqrt_alphas_cumprod[t].view(-1, 1, 1)
+        sqrt_one_minus_alpha = self.scheduler.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1)
+        
+        # x_t = sqrt(alpha) * x_0 + sqrt(1-alpha) * noise
+        # 对于padding位置：x_0=0, noise=0，所以x_t=0
+        x_t = sqrt_alpha * x_0 + sqrt_one_minus_alpha * noise
+        
+        return x_t, noise
 
     def generate_with_cfg(
         self,
