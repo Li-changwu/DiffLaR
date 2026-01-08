@@ -86,8 +86,7 @@ class LitDiffLaRFused(LitCoTModelBase):
         self.loss_history = []
         self.loss_csv_path = None
         
-        # 归一化状态标记
-        self._latent_stats_estimated = False
+        # 注意：归一化状态现在由 latent_diffusion._latent_stats_initialized buffer 管理
 
     def _freeze_llm(self):
         """冻结LLM参数，只训练Diffusion Model"""
@@ -127,7 +126,13 @@ class LitDiffLaRFused(LitCoTModelBase):
             steps_mask = steps_attention_mask[:, :max_length]
         elif current_length < max_length:
             pad_length = max_length - current_length
-            steps_embeds = F.pad(steps_embeds, (0, 0, 0, pad_length), value=0)
+            # 使用 PAD token 的 embedding 而非 0 向量
+            # 0 向量在 embedding 空间中不是"无意义"，而是一个具体的点
+            pad_token_embed = self.embedding(
+                torch.tensor([[self.tokenizer.pad_token_id]], device=self.device)
+            )  # [1, 1, H]
+            pad_embeds = pad_token_embed.expand(batch_size, pad_length, -1)  # [B, pad_length, H]
+            steps_embeds = torch.cat([steps_embeds, pad_embeds], dim=1)
             steps_mask = F.pad(steps_attention_mask, (0, pad_length), value=0)
         else:
             steps_mask = steps_attention_mask
@@ -198,38 +203,46 @@ class LitDiffLaRFused(LitCoTModelBase):
                 condition_mask=query_mask,
             )
             
-            # 生成用于Answer Loss的latent
-            generated_steps_embeds = self._generate_for_training(query_embedding, query_mask)
+            # [修复] Stage 1完全Teacher-Forcing：Answer Loss也用GT
+            # 此时Diffusion还没学好，用生成的latent会产生干扰梯度
+            generated_steps_embeds = gt_steps_embeds
             
         else:
             # ═══ Stage 2: Rollout + Self-Conditioning ═══
             rollout_ratio = self.get_current_rollout_ratio()
             self.latent_diffusion.self_cond_prob = self.stage2_self_cond_prob
             
+            # [修复] Diffusion Loss必须永远指向GT，不能用生成的latent作为目标！
+            # Rollout的目的是让模型在"自身产生误差"时依然能修正方向指向GT
+            diffusion_loss, _, _ = self.latent_diffusion(
+                steps_embeds=gt_steps_embeds,  # 永远用GT作为学习目标
+                condition=query_embedding,
+                attention_mask=steps_mask,
+                condition_mask=query_mask,
+                use_self_cond=True,
+            )
+            
+            # Answer Loss使用生成的latent（这才是Rollout训练的核心）
             if random.random() < rollout_ratio:
-                # Rollout: 用自生成的latent训练Diffusion
+                # Rollout: 用生成的latent计算Answer Loss
                 generated_steps_embeds = self._generate_for_training(query_embedding, query_mask)
-                
-                # 对自生成的latent计算Diffusion Loss
-                diffusion_loss, _, _ = self.latent_diffusion(
-                    steps_embeds=generated_steps_embeds.detach(),  # detach防止二次梯度
-                    condition=query_embedding,
-                    attention_mask=torch.ones_like(steps_mask),
-                    condition_mask=query_mask,
-                    use_self_cond=True,  # 强制使用Self-Cond
-                )
             else:
-                # 保持部分GT训练，防止崩溃
-                diffusion_loss, _, _ = self.latent_diffusion(
-                    steps_embeds=gt_steps_embeds,
-                    condition=query_embedding,
-                    attention_mask=steps_mask,
-                    condition_mask=query_mask,
-                )
-                generated_steps_embeds = self._generate_for_training(query_embedding, query_mask)
+                # 保持部分GT训练，稳定训练
+                generated_steps_embeds = gt_steps_embeds
 
         # 4. Answer Loss
-        answer_steps_mask = torch.ones(batch_size, self.max_latent_length, device=self.device)
+        # Stage 1: 使用真实的 steps_mask
+        # Stage 2: 引入 Mask Dropout，模拟推理时的"全关注"状态
+        if self.training_stage == 1:
+            answer_steps_mask = steps_mask
+        else:
+            # Mask Dropout: 50% 概率使用全 1 mask
+            # 让 LLM 学会：即使 mask=1，看到 PAD embedding 模式时也要忽略
+            # 配合 PAD embedding 使用，确保训练-推理一致性
+            if random.random() < 0.5:
+                answer_steps_mask = torch.ones(batch_size, self.max_latent_length, device=self.device)
+            else:
+                answer_steps_mask = steps_mask
         
         answer_input_ids, answer_attention_mask = self.prepare_inputs(
             answer,
@@ -269,43 +282,47 @@ class LitDiffLaRFused(LitCoTModelBase):
         )
         answer_loss = answer_outputs.loss
 
-        # 5. 总损失
-        total_loss = (
-            self.diffusion_loss_weight * diffusion_loss
-            + self.answer_loss_weight * answer_loss
-        )
+        # 5. 总损失构造（分阶段策略）
+        if self.training_stage == 1:
+            # Stage 1: 专注 Diffusion 学习，Answer Loss 仅用于监控
+            # 此时 Diffusion 还没学好，answer_loss 的梯度可能造成干扰
+            total_loss = self.diffusion_loss_weight * diffusion_loss
+            # detach answer_loss 防止任何意外梯度（虽然用 GT 时本身无梯度）
+            answer_loss_for_log = answer_loss.detach()
+        else:
+            # Stage 2: 联合训练
+            # Diffusion 已有能力生成合理的 latent，Answer Loss 可作为微调信号
+            total_loss = (
+                self.diffusion_loss_weight * diffusion_loss
+                + self.answer_loss_weight * answer_loss
+            )
+            answer_loss_for_log = answer_loss
 
         return {
             "total_loss": total_loss,
             "diffusion_loss": diffusion_loss,
-            "answer_loss": answer_loss,
+            "answer_loss": answer_loss_for_log,
             "training_stage": float(self.training_stage),
             "rollout_ratio": self.get_current_rollout_ratio(),
         }
 
     def _generate_for_training(self, query_embedding, query_mask):
-        """生成用于训练的latent（保留梯度）"""
-        if self.use_cfg:
-            return self.latent_diffusion.generate_with_cfg(
-                condition=query_embedding,
-                num_inference_steps=self.rollout_inference_steps if self.training_stage == 2 else self.train_inference_steps,
-                latent_length=self.max_latent_length,
-                cfg_scale=self.cfg_scale,
-                condition_mask=query_mask,
-                enable_grad=True,
-                clamp_value=self.clamp_value,
-                use_self_cond=True,
-            )
-        else:
-            return self.latent_diffusion.generate(
-                condition=query_embedding,
-                num_inference_steps=self.rollout_inference_steps if self.training_stage == 2 else self.train_inference_steps,
-                latent_length=self.max_latent_length,
-                condition_mask=query_mask,
-                enable_grad=True,
-                clamp_value=self.clamp_value,
-                use_self_cond=True,
-            )
+        """
+        生成用于训练的latent（保留梯度）
+        
+        注意：训练时强制不使用 CFG 以节省显存
+        CFG 需要每步 2 次 forward，10 步 Rollout = 20 次计算图，极易 OOM
+        训练目的是让模型本体学会修正，而非依赖 CFG 技巧
+        """
+        return self.latent_diffusion.generate(
+            condition=query_embedding,
+            num_inference_steps=self.rollout_inference_steps if self.training_stage == 2 else self.train_inference_steps,
+            latent_length=self.max_latent_length,
+            condition_mask=query_mask,
+            enable_grad=True,
+            clamp_value=self.clamp_value,
+            use_self_cond=True,
+        )
 
     @torch.no_grad()
     def latent_generate(
@@ -348,17 +365,22 @@ class LitDiffLaRFused(LitCoTModelBase):
             )
 
         # 拼接并生成答案
-        sep_ids = torch.full(
-            (batch_size, 1), self.thinking_separator_id, device=self.device, dtype=torch.long
-        )
-        sep_embeds = self.embedding(sep_ids)
+        # 统一使用 Tokenizer 处理 separator，确保与训练时一致
+        sep_text = [self.thinking_separator] * batch_size
+        sep_inputs = self.tokenizer(
+            sep_text,
+            return_tensors="pt",
+            add_special_tokens=False,
+        ).to(self.device)
+        sep_embeds = self.embedding(sep_inputs.input_ids)
+        sep_length = sep_embeds.shape[1]
 
         all_embeds = torch.cat([query_embedding, steps_embeds, sep_embeds], dim=1)
         all_attention_mask = torch.cat(
             [
                 question_attention_mask,
                 torch.ones(batch_size, self.max_latent_length, device=self.device, dtype=question_attention_mask.dtype),
-                torch.ones(batch_size, 1, device=self.device, dtype=question_attention_mask.dtype),
+                torch.ones(batch_size, sep_length, device=self.device, dtype=question_attention_mask.dtype),
             ],
             dim=1,
         )
@@ -405,7 +427,7 @@ class LitDiffLaRFused(LitCoTModelBase):
                                'total_loss', 'diffusion_loss', 'answer_loss'])
         
         # 估计归一化参数
-        if self.latent_diffusion.normalize_latent and not self._latent_stats_estimated:
+        if self.latent_diffusion.normalize_latent and not self.latent_diffusion._latent_stats_initialized.item():
             self._estimate_latent_stats(self.trainer.datamodule)
         
         # 打印训练配置
@@ -451,7 +473,7 @@ class LitDiffLaRFused(LitCoTModelBase):
         
         mean, std, scale = self.latent_diffusion.estimate_latent_stats(all_embeds, all_masks)
         
-        self._latent_stats_estimated = True
+        # 状态已在 latent_diffusion.set_latent_stats 中更新
         print(f"Latent stats estimated: Mean norm={mean.norm():.4f}, Std mean={std.mean():.6f}, Scale={scale:.4f}")
 
     def training_step(self, batch, batch_idx, dataloader_idx=0):
@@ -494,7 +516,7 @@ class LitDiffLaRFused(LitCoTModelBase):
         super().on_test_start()
         
         # 如果latent stats未初始化，需要重新估计
-        if self.latent_diffusion.normalize_latent and not self._latent_stats_estimated:
+        if self.latent_diffusion.normalize_latent and not self.latent_diffusion._latent_stats_initialized.item():
             print("Warning: Latent stats not initialized, re-estimating from test data...")
             self._estimate_latent_stats_from_test(self.trainer.datamodule)
 
@@ -528,7 +550,7 @@ class LitDiffLaRFused(LitCoTModelBase):
         
         mean, std, scale = self.latent_diffusion.estimate_latent_stats(all_embeds, all_masks)
         
-        self._latent_stats_estimated = True
+        # 状态已在 latent_diffusion.set_latent_stats 中更新
         print(f"Latent stats estimated: Mean norm={mean.norm():.4f}, Std mean={std.mean():.6f}, Scale={scale:.4f}")
 
     def on_fit_end(self):

@@ -26,8 +26,8 @@ model:
       dropout: 0.1
       
       # 损失权重
-      diffusion_loss_weight: 1.0
-      answer_loss_weight: 5.0
+      diffusion_loss_weight: 5.0
+      answer_loss_weight: 1.0
       
       # CFG配置
       use_cfg: False

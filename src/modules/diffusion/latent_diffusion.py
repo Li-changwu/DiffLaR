@@ -56,7 +56,8 @@ class LatentDiffusion(nn.Module):
         self.register_buffer("latent_mean", torch.zeros(hidden_size))
         self.register_buffer("latent_std", torch.ones(hidden_size))
         self.register_buffer("latent_scale", torch.tensor(1.0))  # 全局缩放因子
-        self.latent_stats_initialized = False
+        # 使用buffer保存初始化状态，确保checkpoint加载后状态正确
+        self.register_buffer("_latent_stats_initialized", torch.tensor(False))
 
         # 噪声调度器
         self.scheduler = NoiseScheduler(
@@ -78,7 +79,7 @@ class LatentDiffusion(nn.Module):
         self.latent_mean.copy_(mean)
         self.latent_std.copy_(std)
         self.latent_scale.fill_(scale)
-        self.latent_stats_initialized = True
+        self._latent_stats_initialized.fill_(True)
 
     def estimate_latent_stats(self, embeddings: torch.Tensor, mask: Optional[torch.Tensor] = None):
         """
@@ -241,8 +242,9 @@ class LatentDiffusion(nn.Module):
                 # 将连续时间t转换为离散时间步（用于denoiser的时间编码）
                 t_discrete = (t * self.num_timesteps).long().clamp(0, self.num_timesteps - 1)
                 prev_velocity = self.denoiser(x_t, t_discrete, condition, attention_mask, condition_mask, x0_cond=None)
-                # 从速度反推x_0: x_0 = x_t - t * velocity
-                x0_cond = x_t - t_expand * prev_velocity
+                # 精确公式: x_t = (1-t)*x_0 + t*noise, v = noise - x_0
+                # 推导: x_0 = (x_t - t*v) / (1-t)
+                x0_cond = (x_t - t_expand * prev_velocity) / (1 - t_expand + 1e-6)
         
         # 6. 模型预测速度
         t_discrete = (t * self.num_timesteps).long().clamp(0, self.num_timesteps - 1)
@@ -399,12 +401,11 @@ class LatentDiffusion(nn.Module):
             # 预测速度
             velocity = self.denoiser(x_t, t_discrete, condition, attention_mask, condition_mask, x0_cond=x0_cond)
             
-            # 从速度反推x_0用于Self-Conditioning
-            # x_t = (1-t)*x_0 + t*noise => x_0 = (x_t - t*velocity) / (1-t) 不太对
-            # 实际上：velocity = noise - x_0，所以 x_0 = x_t - t * velocity（近似）
+            # 精确公式: x_t = (1-t)*x_0 + t*noise, v = noise - x_0
+            # 推导: x_0 = (x_t - t*v) / (1-t)
             if use_self_cond:
                 t_expand = t.view(-1, 1, 1)
-                x0_pred = x_t - t_expand * velocity
+                x0_pred = (x_t - t_expand * velocity) / (1 - t_expand + 1e-6)
                 if clamp_value is not None:
                     x0_pred = torch.clamp(x0_pred, -clamp_value, clamp_value)
             
@@ -586,7 +587,7 @@ class LatentDiffusion(nn.Module):
             
             if use_self_cond:
                 t_expand = t.view(-1, 1, 1)
-                x0_pred = x_t - t_expand * velocity
+                x0_pred = (x_t - t_expand * velocity) / (1 - t_expand + 1e-6)
                 if clamp_value is not None:
                     x0_pred = torch.clamp(x0_pred, -clamp_value, clamp_value)
             
