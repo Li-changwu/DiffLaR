@@ -60,6 +60,7 @@ class LitDiffLaRFused(LitCoTModelBase):
         self.max_latent_length = difflar_config.get("max_latent_length", 256)
         self.diffusion_loss_weight = difflar_config.get("diffusion_loss_weight", 1.0)
         self.answer_loss_weight = difflar_config.get("answer_loss_weight", 5.0)
+        self.alignment_loss_weight = difflar_config.get("alignment_loss_weight", 1.0)  # 中间监督权重
         self.num_inference_steps = difflar_config.get("num_inference_steps", 128)
         self.train_inference_steps = difflar_config.get("train_inference_steps", 10)
         self.use_cfg = difflar_config.get("use_cfg", False)
@@ -203,9 +204,14 @@ class LitDiffLaRFused(LitCoTModelBase):
                 condition_mask=query_mask,
             )
             
-            # [修复] Stage 1完全Teacher-Forcing：Answer Loss也用GT
-            # 此时Diffusion还没学好，用生成的latent会产生干扰梯度
-            generated_steps_embeds = gt_steps_embeds
+            # [改进] Stage 1 也使用生成的 latent + Alignment Loss
+            # 让 LLM 从一开始就适应生成的 embedding，避免 Exposure Bias
+            generated_steps_embeds = self._generate_for_training(query_embedding, query_mask)
+            
+            # 中间监督：Latent Alignment Loss（对齐生成和GT）
+            alignment_loss = self._compute_alignment_loss(
+                generated_steps_embeds, gt_steps_embeds, steps_mask
+            )
             
         else:
             # ═══ Stage 2: Rollout + Self-Conditioning ═══
@@ -226,9 +232,14 @@ class LitDiffLaRFused(LitCoTModelBase):
             if random.random() < rollout_ratio:
                 # Rollout: 用生成的latent计算Answer Loss
                 generated_steps_embeds = self._generate_for_training(query_embedding, query_mask)
+                # 中间监督：Latent Alignment Loss
+                alignment_loss = self._compute_alignment_loss(
+                    generated_steps_embeds, gt_steps_embeds, steps_mask
+                )
             else:
                 # 保持部分GT训练，稳定训练
                 generated_steps_embeds = gt_steps_embeds
+                alignment_loss = torch.tensor(0.0, device=self.device)
 
         # 4. Answer Loss
         # Stage 1: 使用真实的 steps_mask
@@ -282,18 +293,21 @@ class LitDiffLaRFused(LitCoTModelBase):
         )
         answer_loss = answer_outputs.loss
 
-        # 5. 总损失构造（分阶段策略）
+        # 5. 总损失构造（分阶段策略 + 中间监督）
         if self.training_stage == 1:
-            # Stage 1: 专注 Diffusion 学习，Answer Loss 仅用于监控
-            # 此时 Diffusion 还没学好，answer_loss 的梯度可能造成干扰
-            total_loss = self.diffusion_loss_weight * diffusion_loss
-            # detach answer_loss 防止任何意外梯度（虽然用 GT 时本身无梯度）
-            answer_loss_for_log = answer_loss.detach()
-        else:
-            # Stage 2: 联合训练
-            # Diffusion 已有能力生成合理的 latent，Answer Loss 可作为微调信号
+            # Stage 1: Diffusion + Alignment + Answer（权重较低）
+            # 中间监督帮助 latent 更快对齐 GT，减少 Exposure Bias
             total_loss = (
                 self.diffusion_loss_weight * diffusion_loss
+                + self.alignment_loss_weight * alignment_loss
+                + 0.5 * answer_loss  # Stage 1 answer loss 权重较低
+            )
+            answer_loss_for_log = answer_loss
+        else:
+            # Stage 2: 联合训练（全权重）
+            total_loss = (
+                self.diffusion_loss_weight * diffusion_loss
+                + self.alignment_loss_weight * alignment_loss
                 + self.answer_loss_weight * answer_loss
             )
             answer_loss_for_log = answer_loss
@@ -301,10 +315,56 @@ class LitDiffLaRFused(LitCoTModelBase):
         return {
             "total_loss": total_loss,
             "diffusion_loss": diffusion_loss,
+            "alignment_loss": alignment_loss.detach() if torch.is_tensor(alignment_loss) else alignment_loss,
             "answer_loss": answer_loss_for_log,
             "training_stage": float(self.training_stage),
             "rollout_ratio": self.get_current_rollout_ratio(),
         }
+
+    def _compute_alignment_loss(
+        self,
+        generated_embeds: torch.Tensor,
+        gt_embeds: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        计算中间监督的对齐损失
+        
+        三种对齐方式的组合：
+        1. MSE Loss: 逐元素对齐，保证数值接近
+        2. Cosine Loss: 方向对齐，保证语义方向一致
+        3. Feature-wise Loss: 每个位置的特征向量对齐
+        
+        Args:
+            generated_embeds: 生成的 latent [B, L, H]
+            gt_embeds: GT latent [B, L, H]
+            mask: 有效位置掩码 [B, L]
+            
+        Returns:
+            alignment_loss: 标量损失
+        """
+        # 扩展 mask 到 hidden 维度
+        mask_expanded = mask.unsqueeze(-1)  # [B, L, 1]
+        
+        # 1. MSE Loss（只在有效位置计算）
+        mse_loss = F.mse_loss(
+            generated_embeds * mask_expanded,
+            gt_embeds * mask_expanded,
+            reduction='sum'
+        ) / (mask.sum() * generated_embeds.shape[-1] + 1e-8)
+        
+        # 2. Cosine Similarity Loss（方向对齐）
+        # 对每个位置的 hidden vector 计算 cosine similarity
+        gen_norm = F.normalize(generated_embeds, p=2, dim=-1)
+        gt_norm = F.normalize(gt_embeds, p=2, dim=-1)
+        cosine_sim = (gen_norm * gt_norm).sum(dim=-1)  # [B, L]
+        cosine_loss = (1 - cosine_sim) * mask  # 只在有效位置
+        cosine_loss = cosine_loss.sum() / (mask.sum() + 1e-8)
+        
+        # 组合损失（MSE 为主，Cosine 为辅）
+        total_alignment_loss = mse_loss + 0.1 * cosine_loss
+        
+        return total_alignment_loss
 
     def _generate_for_training(self, query_embedding, query_mask):
         """
@@ -424,7 +484,7 @@ class LitDiffLaRFused(LitCoTModelBase):
             with open(self.loss_csv_path, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(['step', 'epoch', 'stage', 'rollout_ratio', 
-                               'total_loss', 'diffusion_loss', 'answer_loss'])
+                               'total_loss', 'diffusion_loss', 'alignment_loss', 'answer_loss'])
         
         # 估计归一化参数
         if self.latent_diffusion.normalize_latent and not self.latent_diffusion._latent_stats_initialized.item():
@@ -490,6 +550,7 @@ class LitDiffLaRFused(LitCoTModelBase):
                 'rollout_ratio': log_dict.get('rollout_ratio', 0.0),
                 'total_loss': log_dict['total_loss'].item(),
                 'diffusion_loss': log_dict['diffusion_loss'].item(),
+                'alignment_loss': log_dict['alignment_loss'].item() if torch.is_tensor(log_dict['alignment_loss']) else log_dict['alignment_loss'],
                 'answer_loss': log_dict['answer_loss'].item(),
             }
             self.loss_history.append(loss_record)
@@ -499,7 +560,8 @@ class LitDiffLaRFused(LitCoTModelBase):
                     writer = csv.writer(f)
                     writer.writerow([step, loss_record['epoch'], loss_record['stage'],
                                    loss_record['rollout_ratio'], loss_record['total_loss'], 
-                                   loss_record['diffusion_loss'], loss_record['answer_loss']])
+                                   loss_record['diffusion_loss'], loss_record['alignment_loss'],
+                                   loss_record['answer_loss']])
         
         # 添加前缀并记录
         log_dict_filtered = {f"train/{k}": v for k, v in log_dict.items() 
