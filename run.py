@@ -221,7 +221,7 @@ def get_args():
 
     parser.add_argument("--test_ckpt_path", default="")
 
-    parser.add_argument("--test_times", type=int, default=5)
+    parser.add_argument("--test_times", type=int, default=1)
 
     parser.add_argument("--seed", type=int, default=0)
 

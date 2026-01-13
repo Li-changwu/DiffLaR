@@ -21,7 +21,7 @@ trainer:
 callbacks:
   - target: lightning.pytorch.callbacks.ModelCheckpoint
     save_last: True
-    save_top_k: 3
+    save_top_k: 2
     mode: max
     monitor: monitor
     auto_insert_metric_name: False
