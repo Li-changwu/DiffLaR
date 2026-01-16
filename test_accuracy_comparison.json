@@ -1,0 +1,21 @@
+{
+  "cot": {
+    "file": "test_20260107-151841.json",
+    "accuracy": 0.31766489764973466,
+    "total_samples": 1319,
+    "correct": 419,
+    "incorrect": 900
+  },
+  "difflar_fused": {
+    "file": "test_20260113-100619.json",
+    "accuracy": 0.04015151515151515,
+    "total_samples": 1320,
+    "correct": 53,
+    "incorrect": 1266
+  },
+  "comparison": {
+    "accuracy_diff": -0.2775133824982195,
+    "accuracy_diff_percent": -27.75133824982195,
+    "relative_improvement_percent": -87.36041802270918
+  }
+}

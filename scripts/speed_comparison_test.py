@@ -164,66 +164,107 @@ class SpeedComparison:
         return [d['question'] for d in test_data[:self.max_samples]]
     
     def _test_cot(self) -> Dict:
-        """测试 CoT 方法的速度"""
+        """测试 CoT 方法的速度（使用自回归生成思考+答案，逻辑与 cot_timing_test 一致）"""
         print("\n" + "="*80)
         print("测试 CoT 方法（自回归生成）")
         print("="*80)
-        
+
+        # 内部生成函数，参考 scripts/cot_timing_test.py
+        def cot_generate(questions: List[str], measure_time: bool = True):
+            """
+            COT思考+答案生成
+            时间测量：从 Query embedding 编码完成后开始，到最终答案生成完成
+            """
+            # 准备输入（不计时）
+            suffix = self.cot_model.speed_template.format("auto") + self.cot_model.thinking_separator
+            input_ids, attention_mask = self.cot_model.prepare_inputs(
+                questions, padding_side="left", part="question", suffix=suffix
+            )
+            input_ids = input_ids.to(self.cot_model.device)
+            attention_mask = attention_mask.to(self.cot_model.device)
+            
+            # 编码 Query（不计时，这是输入准备阶段）
+            # 实际上 prepare_inputs 已经返回了 token ids，这里只是移动到设备
+            
+            # 开始计时：从 Query 输入结束（embedding 编码完成）开始
+            if measure_time:
+                torch.cuda.synchronize()
+                start_time = time.perf_counter()
+
+            gen_config = {
+                "max_new_tokens": 256,
+                "do_sample": False,
+                "pad_token_id": self.cot_model.tokenizer.pad_token_id,
+                "eos_token_id": self.cot_model.tokenizer.eos_token_id,
+            }
+
+            output_ids = self.cot_model.llm.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **gen_config,
+            )
+            
+            if measure_time:
+                torch.cuda.synchronize()
+                end_time = time.perf_counter()
+                elapsed_time = end_time - start_time
+            else:
+                elapsed_time = None
+
+            # 计算生成的token数
+            input_len = input_ids.shape[1]
+            gen_tokens = output_ids.shape[1] - input_len
+            return output_ids, gen_tokens, elapsed_time
+
         # Warmup
         print("Warming up...")
         with torch.no_grad():
-            _ = self.cot_model.latent_generate(self.test_samples[:2])
+            _ = cot_generate(self.test_samples[:2], measure_time=False)
         torch.cuda.synchronize()
-        
-        # 测试
+
+        # 正式测试
         print(f"运行速度测试 (batch_size={self.batch_size})...")
+        print("  测量时间：从 Query 输入结束到最终答案生成完成")
         all_times = []
         all_tokens = []
-        
+
         for i in tqdm(range(0, len(self.test_samples), self.batch_size)):
-            batch_questions = self.test_samples[i:i+self.batch_size]
+            batch_questions = self.test_samples[i : i + self.batch_size]
             if len(batch_questions) < self.batch_size:
                 continue
-            
-            torch.cuda.synchronize()
-            start_time = time.perf_counter()
-            
+
             with torch.no_grad():
-                pred_ids, n_latent_forward = self.cot_model.latent_generate(batch_questions)
-            
-            torch.cuda.synchronize()
-            end_time = time.perf_counter()
-            
-            batch_time = end_time - start_time
-            # 计算生成的token数（包括思考步骤和答案）
-            input_len = len(batch_questions[0])  # 近似值
-            gen_tokens = pred_ids.shape[1] - input_len
+                _, gen_tokens, elapsed_time = cot_generate(batch_questions, measure_time=True)
+
+            batch_time = elapsed_time
             batch_tokens = gen_tokens * len(batch_questions)
-            
+
             all_times.append(batch_time)
             all_tokens.append(batch_tokens)
-        
+
         # 统计结果
         total_time = sum(all_times)
         total_tokens = sum(all_tokens)
         num_samples = len(all_times) * self.batch_size
-        
+
         avg_time_per_sample = total_time / num_samples
         avg_tokens_per_sample = total_tokens / num_samples
         tokens_per_second = total_tokens / total_time
-        
+
         results = {
-            'method': 'CoT',
-            'total_samples': num_samples,
-            'batch_size': self.batch_size,
-            'total_time_seconds': total_time,
-            'avg_time_per_sample_ms': avg_time_per_sample * 1000,
-            'avg_tokens_per_sample': avg_tokens_per_sample,
-            'time_per_token_ms': avg_time_per_sample * 1000 / avg_tokens_per_sample if avg_tokens_per_sample > 0 else 0,
-            'tokens_per_second': tokens_per_second,
-            'samples_per_second': num_samples / total_time,
+            "method": "CoT",
+            "total_samples": num_samples,
+            "batch_size": self.batch_size,
+            "total_time_seconds": total_time,
+            "avg_time_per_sample_ms": avg_time_per_sample * 1000,
+            "avg_tokens_per_sample": avg_tokens_per_sample,
+            "time_per_token_ms": avg_time_per_sample * 1000 / avg_tokens_per_sample
+            if avg_tokens_per_sample > 0
+            else 0,
+            "tokens_per_second": tokens_per_second,
+            "samples_per_second": num_samples / total_time,
         }
-        
+
         self._print_results(results)
         return results
     
@@ -241,6 +282,7 @@ class SpeedComparison:
         
         # 测试
         print(f"运行速度测试 (batch_size={self.batch_size})...")
+        print("  测量时间：从 Query 输入结束到最终答案生成完成")
         all_times = []
         all_tokens = []
         diffusion_times = []
@@ -251,12 +293,8 @@ class SpeedComparison:
             if len(batch_questions) < self.batch_size:
                 continue
             
-            torch.cuda.synchronize()
-            start_time = time.perf_counter()
-            
-            # 分别测量扩散生成和答案生成的时间
+            # 准备输入（不计时，这是输入准备阶段）
             with torch.no_grad():
-                # 准备输入
                 question_input_ids, question_attention_mask = self.difflar_model.prepare_inputs(
                     batch_questions,
                     padding_side="left",
@@ -265,7 +303,13 @@ class SpeedComparison:
                 )
                 query_embedding = self.difflar_model.embedding(question_input_ids)
                 query_mask = question_attention_mask.float()
-                
+            
+            # 开始计时：从 Query embedding 编码完成后开始
+            torch.cuda.synchronize()
+            start_time = time.perf_counter()
+            
+            # 分别测量扩散生成和答案生成的时间
+            with torch.no_grad():
                 # 1. 扩散生成思考步骤
                 torch.cuda.synchronize()
                 diff_start = time.perf_counter()
@@ -375,6 +419,7 @@ class SpeedComparison:
         """打印结果"""
         method = results['method']
         print(f"\n{method} 测试结果:")
+        print(f"  时间测量范围:          从 Query 输入结束到最终答案生成完成")
         print(f"  总样本数:              {results['total_samples']}")
         print(f"  批次大小:              {results['batch_size']}")
         print(f"  总时间:                {results['total_time_seconds']:.2f}s")

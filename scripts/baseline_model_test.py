@@ -58,8 +58,12 @@ class BaselineModelTester:
         llm_path = Path(self.workspace_path) / "models" / "llms" / model_id
         
         # 加载tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(str(llm_path))
-        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+        # 对于decoder-only模型，需要使用left padding
+        tokenizer = AutoTokenizer.from_pretrained(str(llm_path), padding_side="left")
+        # 使用tokenizer已有的pad_token，如果没有则使用eos_token
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
         
         # 加载模型
         model = AutoModelForCausalLM.from_pretrained(
@@ -128,7 +132,7 @@ Answer: 3
     
     def _extract_answer(self, output_string: str) -> str:
         """从输出中提取答案，确保能处理标准格式Answer:XXX"""
-        # 首先尝试提取"Answer:"后面的内容（标准格式）
+        # 首先尝试提取所有"Answer:"后面的内容，取最后一个（通常是最完整的答案）
         # 支持多种格式：Answer: 18, Answer:18, Answer: 18., Answer:18.等
         patterns = [
             r"Answer:\s*([^\n#]+)",  # Answer: 后面到换行或#之前的内容
@@ -137,23 +141,33 @@ Answer: 3
             r"answer\s*:\s*([^\n#]+)",
         ]
         
+        # 找到所有匹配的位置，只取最后一个（避免提取few-shot示例中的答案）
+        all_matches = []
         for pattern in patterns:
-            match = re.search(pattern, output_string, re.IGNORECASE)
-            if match:
-                answer = match.group(1).strip()
-                # 移除可能的标点符号和特殊字符
-                answer = answer.rstrip(".,!?;").strip()
-                # 如果答案包含###分隔符，只取###之前的部分
-                if "###" in answer:
-                    answer = answer.split("###")[0].strip()
-                # 尝试提取数字（GSM数据集答案通常是数字）
-                numbers = re.findall(r'-?\d+\.?\d*', answer)
-                if numbers:
-                    # 返回最后一个数字（通常是最完整的答案）
-                    return numbers[-1]
-                # 如果没有数字，返回清理后的文本
-                if answer:
-                    return answer
+            for match in re.finditer(pattern, output_string, re.IGNORECASE):
+                all_matches.append((match.start(), match.group(1).strip()))
+        
+        if all_matches:
+            # 按位置排序，取最后一个（通常是模型生成的答案，而不是few-shot示例）
+            all_matches.sort(key=lambda x: x[0])
+            answer = all_matches[-1][1]
+            # 移除可能的标点符号和特殊字符
+            answer = answer.rstrip(".,!?;").strip()
+            # 如果答案包含###分隔符，只取###之前的部分
+            if "###" in answer:
+                answer = answer.split("###")[0].strip()
+            # 移除"assistant"等标记
+            answer = re.sub(r'\bassistant\b', '', answer, flags=re.IGNORECASE).strip()
+            # 尝试提取数字（GSM数据集答案通常是数字，支持逗号分隔）
+            # 先移除逗号，然后提取数字
+            answer_no_comma = answer.replace(',', '')
+            numbers = re.findall(r'-?\d+\.?\d*', answer_no_comma)
+            if numbers:
+                # 返回最后一个数字（通常是最完整的答案）
+                return numbers[-1]
+            # 如果没有数字，返回清理后的文本
+            if answer:
+                return answer
         
         # 如果没有找到Answer标记，尝试从整个输出中提取数字
         # 优先查找最后几行中的数字
@@ -167,13 +181,17 @@ Answer: 3
                 # 跳过明显的prompt部分
                 if line.startswith("Question:") or line.startswith("Answer:"):
                     continue
-                # 尝试提取数字
-                numbers = re.findall(r'-?\d+\.?\d*', line)
+                # 移除"assistant"等标记
+                line = re.sub(r'\bassistant\b', '', line, flags=re.IGNORECASE).strip()
+                # 尝试提取数字（支持逗号）
+                line_no_comma = line.replace(',', '')
+                numbers = re.findall(r'-?\d+\.?\d*', line_no_comma)
                 if numbers:
                     return numbers[-1]
         
-        # 如果还是没找到，尝试从整个字符串中提取最后一个数字
-        all_numbers = re.findall(r'-?\d+\.?\d*', output_string)
+        # 如果还是没找到，尝试从整个字符串中提取最后一个数字（支持逗号）
+        output_no_comma = output_string.replace(',', '')
+        all_numbers = re.findall(r'-?\d+\.?\d*', output_no_comma)
         if all_numbers:
             return all_numbers[-1]
         
@@ -183,10 +201,18 @@ Answer: 3
     def _verify_answer(self, gt_answer: str, pred_answer: str) -> float:
         """验证答案是否正确"""
         def get_pure_string(s: str):
-            return s.strip("#\n ").rstrip(".").replace(",", "").lower()
+            # 移除所有标点符号、空格、换行，并转换为小写
+            s = s.strip("#\n ").rstrip(".,!?;").replace(",", "").replace(" ", "").lower()
+            # 移除常见的非数字字符
+            s = re.sub(r'[^\d\.\-]', '', s)
+            return s
         
         gt_answer = get_pure_string(gt_answer)
         pred_answer = get_pure_string(pred_answer)
+        
+        # 如果都为空，返回False
+        if not gt_answer or not pred_answer:
+            return 0.0
         
         try:  # 尝试转换为数字进行比较
             gt_answer = float(gt_answer)
@@ -226,6 +252,7 @@ Answer: 3
                 **inputs,
                 max_new_tokens=self.max_new_tokens,
                 do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
             )
         torch.cuda.synchronize()
         
@@ -248,7 +275,7 @@ Answer: 3
             start_time = time.perf_counter()
             
             with torch.no_grad():
-                # 准备输入
+                # 准备输入（使用left padding）
                 inputs = self.tokenizer(
                     batch_questions,
                     return_tensors="pt",
@@ -261,6 +288,7 @@ Answer: 3
                     **inputs,
                     max_new_tokens=self.max_new_tokens,
                     do_sample=False,
+                    pad_token_id=self.tokenizer.pad_token_id,
                 )
             
             torch.cuda.synchronize()
@@ -270,19 +298,33 @@ Answer: 3
             
             # 解码输出
             input_lengths = inputs['attention_mask'].sum(dim=1)
-            output_strings = self.tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+            input_ids = inputs['input_ids']
+            
+            # 只解码新生成的部分（不包括输入）
+            generated_ids = []
+            for j in range(len(batch_questions)):
+                input_len = input_lengths[j].item()
+                # 只取生成的部分（跳过输入部分）
+                gen_ids = pred_ids[j][input_len:]
+                generated_ids.append(gen_ids)
+            
+            # 解码生成的文本
+            generated_texts = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+            # 也解码完整输出用于调试
+            full_output_strings = self.tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
             
             # 计算生成的token数和准确度
             batch_tokens = 0
             batch_acc = []
             
-            for j, (output_str, gt_answer, input_len) in enumerate(zip(output_strings, batch_answers, input_lengths)):
+            for j, (gen_text, full_output, gt_answer, input_len) in enumerate(zip(generated_texts, full_output_strings, batch_answers, input_lengths)):
                 # 计算生成的token数
-                gen_tokens = pred_ids[j].shape[0] - input_len.item()
+                actual_input_len = input_len.item()
+                gen_tokens = max(0, pred_ids[j].shape[0] - actual_input_len)
                 batch_tokens += gen_tokens
                 
-                # 提取和验证答案
-                pred_answer = self._extract_answer(output_str)
+                # 从生成的文本中提取答案（只使用新生成的部分）
+                pred_answer = self._extract_answer(gen_text)
                 acc = self._verify_answer(gt_answer, pred_answer)
                 batch_acc.append(acc)
                 
@@ -291,7 +333,8 @@ Answer: 3
                     'question': batch_samples[j]['question'],
                     'ground_truth': gt_answer,
                     'predicted': pred_answer,
-                    'output': output_str,
+                    'generated_text': gen_text,  # 只保存生成的部分
+                    'full_output': full_output,  # 保存完整输出用于调试
                     'accuracy': acc,
                 })
             

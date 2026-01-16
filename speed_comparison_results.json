@@ -1,0 +1,31 @@
+{
+  "cot": {
+    "method": "CoT",
+    "total_samples": 200,
+    "batch_size": 8,
+    "total_time_seconds": 80.88898084871471,
+    "avg_time_per_sample_ms": 404.44490424357355,
+    "avg_tokens_per_sample": 225.12,
+    "time_per_token_ms": 1.7965747345574516,
+    "tokens_per_second": 556.6147518190102,
+    "samples_per_second": 2.4725246615983036
+  },
+  "difflar_fused": {
+    "method": "DiffLaR Fused",
+    "num_inference_steps": 128,
+    "total_samples": 200,
+    "batch_size": 8,
+    "total_time_seconds": 136.56445851176977,
+    "total_diffusion_time_seconds": 126.04778587259352,
+    "total_answer_time_seconds": 10.515931909903884,
+    "avg_time_per_sample_ms": 682.8222925588489,
+    "avg_diffusion_time_ms": 630.2389293629676,
+    "avg_answer_time_ms": 52.57965954951942,
+    "avg_tokens_per_sample": -199.44,
+    "time_per_token_ms": 0,
+    "tokens_per_second": -292.08185229660074,
+    "samples_per_second": 1.4645098891726873
+  },
+  "speedup": 0.592313561890214,
+  "time_reduction_percent": -68.82949578408457
+}
