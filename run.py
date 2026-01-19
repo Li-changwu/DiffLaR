@@ -77,7 +77,13 @@ def _preprocess_config(config, args, unknown_args):
                 raise ValueError(f"{key_path} is not found in config")
 
         for key_idx in range(len_keys - 1):  #
-            inplace_dict = inplace_dict[keys[key_idx]]
+            cur_key = keys[key_idx]
+            if isinstance(inplace_dict, (DictConfig, dict)) and cur_key not in inplace_dict:
+                raise ValueError(
+                    f"Config key path '{key_path}' is invalid: missing intermediate key '{cur_key}'. "
+                    f"Available keys at this level: {list(inplace_dict.keys())}"
+                )
+            inplace_dict = inplace_dict[cur_key]
 
             if isinstance(inplace_dict, ListConfig):
                 for item in inplace_dict:

@@ -17,7 +17,7 @@ model:
     difflar_config:
       # ═══ Diffusion模型配置 ═══
       # 当 model_kwargs.load_llm=false（Stage1完全解耦）时需要显式提供 hidden_size
-      hidden_size: 1024
+      hidden_size: 2048
       max_latent_length: 256
       max_condition_length: 128
       num_timesteps: 1000
