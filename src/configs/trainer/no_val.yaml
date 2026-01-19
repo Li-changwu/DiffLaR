@@ -1,0 +1,31 @@
+trainer:
+  target: lightning.pytorch.trainer.Trainer
+  devices: 0
+  max_steps: -1
+  # 关闭验证相关逻辑（Stage1 用 hidden_states 数据集时避免 eval_generation）
+  check_val_every_n_epoch: 0
+  limit_val_batches: 0
+  num_sanity_val_steps: 0
+  log_every_n_steps: 10
+  gradient_clip_val: 1.0
+  reload_dataloaders_every_n_epochs: 0
+  accumulate_grad_batches: 1
+  precision: bf16-mixed
+  use_distributed_sampler: True
+  strategy: auto
+
+  logger:
+    target: lightning.pytorch.loggers.TensorBoardLogger
+    save_dir:
+    name:
+    version:
+
+callbacks:
+  - target: lightning.pytorch.callbacks.ModelCheckpoint
+    save_last: True
+    # Stage1 无验证时没有 monitor 指标；只保留 last.ckpt
+    save_top_k: 0
+    auto_insert_metric_name: False
+    filename: "epoch{epoch}__step{step}"
+    save_weights_only: True
+

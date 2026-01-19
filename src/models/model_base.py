@@ -27,16 +27,23 @@ class LitCoTModelBase(pl.LightningModule):
         self.model_kwargs = model_kwargs
         self.save_hyperparameters()
 
+        # 可选：最大程度解耦（Stage1 只训练 diffusion/latent head 等，不加载 LLM/tokenizer）
+        # 用法：在 config 里设置 model.model_kwargs.load_llm=false
+        self.load_llm = bool(model_kwargs.get("load_llm", True))
+
         llm_path = opj(all_config.args.workspace_path, "models", "llms", model_kwargs.model_id)
         ### IMPORTANT: replace the llm path to YOUR OWN llm path ###
 
-        # tokenizer
-        self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(llm_path)
-        if model_kwargs.get("set_pad_as_last_token", False):  # we don't use this, but might help
-            self.tokenizer.pad_token = "[PAD]"
-            self.tokenizer.pad_token_id = len(self.tokenizer) - 1
+        if self.load_llm:
+            # tokenizer
+            self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(llm_path)
+            if model_kwargs.get("set_pad_as_last_token", False):  # we don't use this, but might help
+                self.tokenizer.pad_token = "[PAD]"
+                self.tokenizer.pad_token_id = len(self.tokenizer) - 1
+            else:
+                self.tokenizer.add_special_tokens({"pad_token": "[PAD]"})
         else:
-            self.tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+            self.tokenizer = None
 
         # prompt templates
         if model_kwargs.get('chat_template'):
@@ -58,24 +65,28 @@ Question: {} Let's think step by step:
             self.question_template = "Question: {} Let's think step by step:"
         self.speed_template = "(Thinking speed: {})"
         self.thinking_separator = "###"
-        self.thinking_separator_id = self.tokenizer.convert_tokens_to_ids(self.thinking_separator)
+        self.thinking_separator_id = self.tokenizer.convert_tokens_to_ids(self.thinking_separator) if self.tokenizer is not None else None
         self.steps_template = "{}"
         self.answer_template = "Answer:{}"
 
         # llm
-        self.llm: LlamaForCausalLM = AutoModelForCausalLM.from_pretrained(llm_path)
-        if not model_kwargs.get("set_pad_as_last_token", False):  # not used, but might help
-            self.llm.resize_token_embeddings(len(self.tokenizer))
-        self.llm.generation_config.pad_token_id = self.tokenizer.pad_token_id
-        self.llm.generation_config.eos_token_id = self.tokenizer.eos_token_id
-        self.embedding = self.llm.get_input_embeddings()
+        if self.load_llm:
+            self.llm: LlamaForCausalLM = AutoModelForCausalLM.from_pretrained(llm_path)
+            if not model_kwargs.get("set_pad_as_last_token", False):  # not used, but might help
+                self.llm.resize_token_embeddings(len(self.tokenizer))
+            self.llm.generation_config.pad_token_id = self.tokenizer.pad_token_id
+            self.llm.generation_config.eos_token_id = self.tokenizer.eos_token_id
+            self.embedding = self.llm.get_input_embeddings()
+        else:
+            self.llm = None
+            self.embedding = None
         
         # enable gradient checkpointing to save memory
-        if model_kwargs.get("gradient_checkpointing", True):
+        if self.load_llm and model_kwargs.get("gradient_checkpointing", True):
             self.llm.gradient_checkpointing_enable()
 
         # lora (applied after all the configurations readied)
-        if model_kwargs.do_lora:
+        if self.load_llm and model_kwargs.do_lora:
             self.llm = get_peft_model(self.llm, peft_config=LoraConfig(**model_kwargs.lora_config))
             self.llm.print_trainable_parameters()
 
@@ -474,7 +485,7 @@ Question: {} Let's think step by step:
             outputs_token_ids, n_latent_forward = self.fixed_length_latent_generate(questions=questions)
         elif sft_method == "cot" or sft_method == "icot":
             outputs_token_ids, n_latent_forward = self.text_generate(questions=questions)
-        elif sft_method == "difflar" or sft_method == "difflar_fused":
+        elif sft_method in ("difflar", "difflar_fused", "difflar_hidden"):
             outputs_token_ids, n_latent_forward = self.latent_generate(questions=questions)
         else:
             raise NotImplementedError(f"Unknown sft_method: {sft_method}")

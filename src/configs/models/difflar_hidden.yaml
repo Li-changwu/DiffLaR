@@ -1,0 +1,99 @@
+seed: ~
+
+model:
+  target: src.models.difflar_hidden.LitDiffLaRHidden
+  model_kwargs:
+    model_id: Llama-3.2-1B-Instruct
+    sft_method: difflar_hidden
+    chat_template: False
+    # Stage1 完全解耦时可设为 false（不加载 tokenizer/LLM/LoRA）
+    load_llm: True
+
+    do_lora: True
+    lora_config:
+      r: 128
+      lora_alpha: 32
+
+    difflar_config:
+      # ═══ Diffusion模型配置 ═══
+      # 当 model_kwargs.load_llm=false（Stage1完全解耦）时需要显式提供 hidden_size
+      hidden_size: 2048
+      max_latent_length: 256
+      max_condition_length: 128
+      num_timesteps: 1000
+      num_inference_steps: 32          # 关键：从 128 减少到 32
+      train_inference_steps: 10
+      noise_schedule: linear
+      
+      # 去噪网络配置
+      denoiser_layers: 6
+      denoiser_heads: 8
+      dropout: 0.1
+      
+      # 损失权重
+      diffusion_loss_weight: 5.0     # Diffusion Loss 权重（Stage1 和 Stage2）
+      alignment_loss_weight: 3.0      # Alignment Loss 权重（Stage1 和 Stage2）
+      answer_loss_weight: 1.0         # Answer Loss 权重（仅 Stage2）
+      
+      # CFG配置
+      use_cfg: False
+      cfg_scale: 1.5
+      
+      # 数据归一化
+      normalize_latent: True
+      
+      # 预测目标: epsilon(噪声), x0(干净数据), flow(Flow Matching速度)
+      # 推荐使用 flow 以获得更稳定的训练和更少的推理步数
+      prediction_type: flow
+      clamp_value: 3.0
+      
+      # 采样器类型: ddpm, ddim, euler(仅用于flow)
+      # 当prediction_type=flow时，采样器自动使用欧拉积分
+      sampler_type: euler
+      ddim_eta: 0.0
+      
+      # ═══ 两阶段训练配置 ═══
+      # Stage1 是否完全不加载LLM（避免显存占用；Stage2/推理需要设为false）
+      stage1_no_llm: False
+      stage1_epochs: 20              # Stage1 总 epoch 数
+      stage1a_ratio: 0.5            # Stage1a 占比（前 50%）
+      stage1b_ratio: 0.5            # Stage1b 占比（后 50%）
+      
+      # ═══ Stage1a 配置（基础去噪训练） ═══
+      stage1a_train_inference_steps: 10      # 快速训练
+      
+      # ═══ Stage1b 配置（全噪声生成训练） ═══
+      stage1b_train_inference_steps: 20      # 接近推理（32步）
+      stage1b_high_noise_ratio: 0.5          # 高噪声采样比例（t ~ U[0.8, 1.0]）
+      
+      # ═══ Self-Conditioning配置 ═══
+      stage1_self_cond_prob: 0.5
+      stage2_self_cond_prob: 1.0
+
+    answer_generation_config:
+      max_new_tokens: 16
+      do_sample: True
+      top_p: 0.9
+      temperature: 1.0
+
+  training_kwargs:
+    optimizer:
+      target: torch.optim.AdamW
+      lr: 1e-4
+      weight_decay: 0.01
+    use_scheduler: False
+    scheduler:
+      target: constant_schedule_with_warmup
+      warmup_steps: 1000
+
+trainer:
+  max_epochs: 20
+
+dataloader:
+  batch_size: 64
+  val_batch_size: 32
+  num_workers: 8
+  pin_memory: True
+  persistent_workers: True
+
+

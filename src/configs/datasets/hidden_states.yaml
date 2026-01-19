@@ -1,0 +1,7 @@
+data_module:
+  target: src.datasets.hidden_state_datamodule.HiddenStateDataModule
+  
+  # kwargs:
+  dataset_name: hidden_states
+  hidden_states_dir: data/hidden_states
+
