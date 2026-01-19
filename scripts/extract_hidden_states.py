@@ -1,8 +1,11 @@
 """
-提取并保存 Last Hidden States 的脚本
+提取并保存 DiffLaR Hidden Stage1 所需的离线特征。
+
+- Question: 保存 Query Embeddings（作为 Diffusion condition）
+- Steps: 保存 Last Hidden States（作为 Diffusion target）
 
 用于 DiffLaR Hidden 算法的数据预处理阶段。
-一次性提取 Question 和 Steps 的 Last Hidden States，供 Stage1 训练使用。
+一次性提取 Question Embeddings 和 Steps 的 Last Hidden States，供 Stage1 训练使用。
 """
 
 import os
@@ -76,7 +79,7 @@ def extract_hidden_states(
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
     
     # 初始化存储容器
-    all_question_hidden = []
+    all_question_embeds = []
     all_steps_hidden = []
     all_question_mask = []
     all_steps_mask = []
@@ -103,13 +106,7 @@ def extract_hidden_states(
             # 这样即使 padding token 的 embedding 非零，也不会污染 hidden states 分布
             question_embeds = question_embeds * question_inputs.attention_mask.unsqueeze(-1)
             
-            question_outputs = model.forward(
-                inputs_embeds=question_embeds,
-                attention_mask=question_inputs.attention_mask,
-                output_hidden_states=True,
-            )
-            
-            question_hidden = question_outputs.hidden_states[-1]  # [B, L_q, H]
+            # Question 作为 Diffusion condition：直接保存 Query Embeddings（而不是 last hidden state）
             question_mask = question_inputs.attention_mask  # [B, L_q]
             
             # 处理 Steps
@@ -135,14 +132,14 @@ def extract_hidden_states(
             steps_mask = steps_inputs.attention_mask  # [B, L_s]
             
             # 保存到 CPU（节省显存）
-            all_question_hidden.append(question_hidden.cpu())
+            all_question_embeds.append(question_embeds.cpu())  # 保存 question_embeds 而非 last hidden state
             all_steps_hidden.append(steps_hidden.cpu())
             all_question_mask.append(question_mask.cpu())
             all_steps_mask.append(steps_mask.cpu())
     
     # 合并并保存
     print("Concatenating and saving...")
-    all_question_hidden = torch.cat(all_question_hidden, dim=0)  # [N, L_q, H]
+    all_question_embeds = torch.cat(all_question_embeds, dim=0)  # [N, L_q, H]
     all_steps_hidden = torch.cat(all_steps_hidden, dim=0)  # [N, L_s, H]
     all_question_mask = torch.cat(all_question_mask, dim=0)  # [N, L_q]
     all_steps_mask = torch.cat(all_steps_mask, dim=0)  # [N, L_s]
@@ -150,10 +147,10 @@ def extract_hidden_states(
     # 保存为更省空间的 dtype（mask 不变）
     hidden_dtype = str(hidden_dtype).lower()
     if hidden_dtype in ("fp16", "float16", "half"):
-        all_question_hidden = all_question_hidden.to(torch.float16)
+        all_question_embeds = all_question_embeds.to(torch.float16)
         all_steps_hidden = all_steps_hidden.to(torch.float16)
     elif hidden_dtype in ("fp32", "float32", "float"):
-        all_question_hidden = all_question_hidden.to(torch.float32)
+        all_question_embeds = all_question_embeds.to(torch.float32)
         all_steps_hidden = all_steps_hidden.to(torch.float32)
     else:
         raise ValueError(f"Unsupported hidden_dtype: {hidden_dtype}. Use float16/float32.")
@@ -162,7 +159,8 @@ def extract_hidden_states(
     os.makedirs(output_dir, exist_ok=True)
     
     # 保存到文件
-    torch.save(all_question_hidden, os.path.join(output_dir, "question_hidden_states.pt"))
+    # Stage1: Query Embeddings 作为 Diffusion condition；Steps Last Hidden State 作为 Diffusion target
+    torch.save(all_question_embeds, os.path.join(output_dir, "question_embeddings.pt"))
     torch.save(all_steps_hidden, os.path.join(output_dir, "steps_hidden_states.pt"))
     torch.save(all_question_mask, os.path.join(output_dir, "question_attention_mask.pt"))
     torch.save(all_steps_mask, os.path.join(output_dir, "steps_attention_mask.pt"))
@@ -170,10 +168,14 @@ def extract_hidden_states(
     # 保存元信息
     metadata = {
         "num_samples": len(dataset),
-        "hidden_size": all_question_hidden.shape[-1],
-        "max_question_length": all_question_hidden.shape[1],
+        "hidden_size": all_question_embeds.shape[-1],
+        "max_question_length": all_question_embeds.shape[1],
         "max_steps_length": all_steps_hidden.shape[1],
         "model_path": model_path,
+        "question_representation": "input_embeddings_masked",
+        "question_files": ["question_embeddings.pt"],
+        "steps_representation": "last_hidden_state",
+        "steps_files": ["steps_hidden_states.pt"],
         "extraction_config": {
             "batch_size": batch_size,
             "max_question_length": max_question_length,

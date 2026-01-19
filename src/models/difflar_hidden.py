@@ -188,21 +188,21 @@ class LitDiffLaRHidden(LitCoTModelBase):
         
         Args:
             batch: 包含预保存的 Hidden States
-                - question_hidden: [B, L_q, H]  # Question Hidden State（条件输入）
+                - question_embeds: [B, L_q, H]  # Question Embeddings（条件输入）
                 - steps_hidden: [B, L_s, H]      # Steps Hidden State（学习目标）
                 - question_mask: [B, L_q]
                 - steps_mask: [B, L_s]
         """
         # 1. 从 batch 中获取预保存的 Hidden States
         # 注意：HiddenStateDataset 可能以 float16 落盘以节省空间；这里统一转 float32 保证训练数值稳定
-        question_hidden = batch["question_hidden"].float()  # [B, L_q, H]
+        question_embeds = batch["question_embeds"].float()  # [B, L_q, H]
         steps_hidden = batch["steps_hidden"].float()  # [B, L_s, H]
         question_mask = batch["question_mask"].float()  # [B, L_q]
         steps_mask = batch["steps_mask"].float()  # [B, L_s]
         
         # 2. 将变长的 Hidden States 转换为固定长度
-        question_hidden_padded, question_mask_padded = self._pad_to_fixed_length(
-            question_hidden, question_mask, self.max_condition_length
+        question_cond_padded, question_mask_padded = self._pad_to_fixed_length(
+            question_embeds, question_mask, self.max_condition_length
         )
         steps_hidden_padded, steps_mask_padded = self._pad_to_fixed_length(
             steps_hidden, steps_mask, self.max_latent_length
@@ -229,7 +229,7 @@ class LitDiffLaRHidden(LitCoTModelBase):
         # 计算 Diffusion Loss
         diffusion_loss, _, _ = self.latent_diffusion(
             steps_embeds=steps_hidden_padded,
-            condition=question_hidden_padded,
+            condition=question_cond_padded,
             attention_mask=steps_mask_padded,
             condition_mask=question_mask_padded,
             use_self_cond=None,  # 按概率决定
@@ -238,7 +238,7 @@ class LitDiffLaRHidden(LitCoTModelBase):
         # 5. 生成 Steps Hidden State（用于 Alignment Loss）
         train_inference_steps = self.stage1b_train_inference_steps if is_stage1b else self.stage1a_train_inference_steps
         generated_steps_hidden = self.latent_diffusion.generate(
-            condition=question_hidden_padded,
+            condition=question_cond_padded,
             num_inference_steps=train_inference_steps,
             latent_length=self.max_latent_length,
             condition_mask=question_mask_padded,
