@@ -130,6 +130,7 @@ class LatentDiffusion(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         condition_mask: Optional[torch.Tensor] = None,
         use_self_cond: Optional[bool] = None,
+        t_range: Optional[Tuple[float, float]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         训练时的前向传播（支持Self-Conditioning和Flow Matching）
@@ -155,7 +156,7 @@ class LatentDiffusion(nn.Module):
 
         # ═══ Flow Matching 路径 ═══
         if self.use_flow_matching:
-            return self._forward_flow_matching(x_0, condition, attention_mask, condition_mask, use_self_cond)
+            return self._forward_flow_matching(x_0, condition, attention_mask, condition_mask, use_self_cond, t_range=t_range)
         
         # ═══ DDPM/DDIM 路径 ═══
         # 1. 随机采样时间步
@@ -202,6 +203,7 @@ class LatentDiffusion(nn.Module):
         attention_mask: Optional[torch.Tensor],
         condition_mask: Optional[torch.Tensor],
         use_self_cond: Optional[bool],
+        t_range: Optional[Tuple[float, float]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Flow Matching训练：线性插值 + 速度预测
@@ -214,8 +216,23 @@ class LatentDiffusion(nn.Module):
         batch_size = x_0.shape[0]
         device = x_0.device
         
-        # 1. 采样连续时间 t ~ U[0, 1]
-        t = torch.rand(batch_size, device=device)
+        # 1. 采样连续时间 t
+        # 默认：t ~ U[0, 1]
+        # Stage1b高噪声训练可传入 t_range=(0.8, 1.0)
+        if t_range is not None:
+            t_min, t_max = t_range
+            # 防御性处理，避免非法范围
+            t_min = float(max(0.0, min(1.0, t_min)))
+            t_max = float(max(0.0, min(1.0, t_max)))
+            if t_max < t_min:
+                t_min, t_max = t_max, t_min
+            # 退化情况：范围极小
+            if (t_max - t_min) < 1e-8:
+                t = torch.full((batch_size,), t_min, device=device)
+            else:
+                t = torch.rand(batch_size, device=device) * (t_max - t_min) + t_min
+        else:
+            t = torch.rand(batch_size, device=device)
         
         # 2. 采样噪声（关键改进：只在有效位置添加噪声）
         noise = torch.randn_like(x_0)

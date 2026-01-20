@@ -164,9 +164,14 @@ Question: {} Let's think step by step:
 
     def on_save_checkpoint(self, checkpoint):
         # only save the trainable parameters
+        trainable_names = getattr(self, "trainable_parameter_names", None)
+        if not trainable_names:
+            return
+
         new_state_dict = OrderedDict()
-        for k in self.trainable_parameter_names:
-            new_state_dict[k] = checkpoint["state_dict"][k]
+        for k in trainable_names:
+            if k in checkpoint["state_dict"]:
+                new_state_dict[k] = checkpoint["state_dict"][k]
         checkpoint["state_dict"] = new_state_dict
 
     def on_test_start(self):

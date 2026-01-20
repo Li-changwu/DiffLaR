@@ -27,5 +27,5 @@ callbacks:
     save_top_k: 0
     auto_insert_metric_name: False
     filename: "epoch{epoch}__step{step}"
-    save_weights_only: True
+    save_weights_only: False
 

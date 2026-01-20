@@ -220,11 +220,9 @@ class LitDiffLaRHidden(LitCoTModelBase):
         self.latent_diffusion.self_cond_prob = self.stage1_self_cond_prob
         
         # Stage1b 高噪声采样：修改 Flow Matching 的时间采样范围
+        t_range = None
         if is_stage1b and random.random() < self.stage1b_high_noise_ratio:
-            # 临时修改 Flow Matching 的时间采样范围
-            # 注意：这需要在 LatentDiffusion 中添加支持，当前先使用正常采样
-            # 高噪声训练的效果主要通过增加 train_inference_steps 来实现
-            pass
+            t_range = (0.8, 1.0)
         
         # 计算 Diffusion Loss
         diffusion_loss, _, _ = self.latent_diffusion(
@@ -233,6 +231,7 @@ class LitDiffLaRHidden(LitCoTModelBase):
             attention_mask=steps_mask_padded,
             condition_mask=question_mask_padded,
             use_self_cond=None,  # 按概率决定
+            t_range=t_range,  # 传入高噪声采样范围
         )
         
         # 5. 生成 Steps Hidden State（用于 Alignment Loss）

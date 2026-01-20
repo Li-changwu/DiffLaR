@@ -63,7 +63,7 @@ model:
       stage1a_train_inference_steps: 10      # 快速训练
       
       # ═══ Stage1b 配置（全噪声生成训练） ═══
-      stage1b_train_inference_steps: 20      # 接近推理（32步）
+      stage1b_train_inference_steps: 10      # 接近推理（32步）
       stage1b_high_noise_ratio: 0.5          # 高噪声采样比例（t ~ U[0.8, 1.0]）
       
       # ═══ Self-Conditioning配置 ═══
