@@ -21,7 +21,7 @@ model:
       max_latent_length: 256
       max_condition_length: 128
       num_timesteps: 1000
-      num_inference_steps: 32          # 关键：从 128 减少到 32
+      num_inference_steps: 10
       train_inference_steps: 10
       noise_schedule: linear
       
@@ -31,8 +31,8 @@ model:
       dropout: 0.1
       
       # 损失权重
-      diffusion_loss_weight: 5.0     # Diffusion Loss 权重（Stage1 和 Stage2）
-      alignment_loss_weight: 3.0      # Alignment Loss 权重（Stage1 和 Stage2）
+      diffusion_loss_weight: 2.0     # Diffusion Loss 权重（Stage1 和 Stage2）
+      alignment_loss_weight: 0.6     # Alignment Loss 权重（Stage1 和 Stage2）
       answer_loss_weight: 1.0         # Answer Loss 权重（仅 Stage2）
       
       # CFG配置
@@ -55,6 +55,8 @@ model:
       # ═══ 两阶段训练配置 ═══
       # Stage1 是否完全不加载LLM（避免显存占用；Stage2/推理需要设为false）
       stage1_no_llm: False
+      # Stage2 是否冻结 LLM（不训练 LoRA/全参），仅用 answer loss 的梯度回传来修正 diffusion
+      stage2_freeze_llm: True
       stage1_epochs: 20              # Stage1 总 epoch 数
       stage1a_ratio: 0.5            # Stage1a 占比（前 50%）
       stage1b_ratio: 0.5            # Stage1b 占比（后 50%）

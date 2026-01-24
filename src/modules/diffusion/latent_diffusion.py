@@ -300,6 +300,7 @@ class LatentDiffusion(nn.Module):
         enable_grad: bool = False,
         clamp_value: Optional[float] = 3.0,
         use_self_cond: bool = True,
+        debug_nan: bool = False,
     ) -> torch.Tensor:
         """
         推理时生成Steps Embedding（支持Self-Conditioning和Flow Matching）
@@ -341,6 +342,10 @@ class LatentDiffusion(nn.Module):
             timesteps = self.scheduler.get_timesteps(num_inference_steps).to(device)
 
             for i, t in enumerate(timesteps):
+                if debug_nan:
+                    if torch.isnan(x_t).any() or torch.isinf(x_t).any():
+                        raise RuntimeError(f"[LatentDiffusion.generate] NaN/Inf in x_t before step {i}, t={int(t)}")
+
                 t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long)
                 t_prev = timesteps[i + 1] if i + 1 < len(timesteps) else torch.tensor(-1)
                 t_prev_batch = torch.full((batch_size,), t_prev, device=device, dtype=torch.long)

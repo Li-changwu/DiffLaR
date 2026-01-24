@@ -1,0 +1,56 @@
+seed: ~
+
+model:
+  target: src.models.difflar_hidden_stage1.LitDiffLaRHiddenStage1
+  model_kwargs:
+    difflar_config:
+      hidden_size: 2048
+      max_latent_length: 256
+      max_condition_length: 128
+      num_timesteps: 1000
+      num_inference_steps: 10
+      noise_schedule: linear
+
+      denoiser_layers: 6
+      denoiser_heads: 8
+      dropout: 0.1
+
+      diffusion_loss_weight: 2.0
+      alignment_loss_weight: 0.6
+
+      normalize_latent: True
+      prediction_type: flow
+      sampler_type: euler
+      ddim_eta: 0.0
+
+      stage1_epochs: 20
+      stage1a_ratio: 0.5
+      stage1b_train_inference_steps: 10
+      stage1a_train_inference_steps: 10
+      stage1b_high_noise_ratio: 0.5
+
+      stage1_self_cond_prob: 0.5
+
+  training_kwargs:
+    optimizer:
+      target: torch.optim.AdamW
+      lr: 1e-4
+      weight_decay: 0.01
+    use_scheduler: False
+    scheduler:
+      target: constant_schedule_with_warmup
+      warmup_steps: 1000
+
+trainer:
+  max_epochs: 20
+
+dataloader:
+  batch_size: 64
+  val_batch_size: 32
+  num_workers: 8
+  pin_memory: True
+  persistent_workers: True
+
+
+
+

@@ -1,0 +1,56 @@
+seed: ~
+
+model:
+  target: src.models.difflar_hidden_stage2.LitDiffLaRHiddenStage2
+  model_kwargs:
+    model_id: Llama-3.2-1B-Instruct
+    sft_method: difflar_hidden
+    chat_template: False
+    load_llm: True
+
+    do_lora: False
+
+    stage1_diffusion_ckpt_path: ~
+
+    difflar_config:
+      max_latent_length: 256
+      max_condition_length: 128
+      num_timesteps: 1000
+      num_inference_steps: 10
+      noise_schedule: linear
+
+      denoiser_layers: 6
+      denoiser_heads: 8
+      dropout: 0.1
+
+      normalize_latent: True
+      prediction_type: flow
+      sampler_type: euler
+      ddim_eta: 0.0
+
+    answer_generation_config:
+      max_new_tokens: 16
+      do_sample: True
+      top_p: 0.9
+      temperature: 1.0
+
+  training_kwargs:
+    optimizer:
+      target: torch.optim.AdamW
+      lr: 1e-4
+      weight_decay: 0.01
+    use_scheduler: False
+    scheduler:
+      target: constant_schedule_with_warmup
+      warmup_steps: 1000
+
+trainer:
+  max_epochs: 3
+
+dataloader:
+  batch_size: 16
+  val_batch_size: 16
+  num_workers: 8
+  pin_memory: True
+  persistent_workers: True
+
